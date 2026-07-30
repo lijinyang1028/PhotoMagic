@@ -1,0 +1,4 @@
+PyQt6>=6.5
+requests>=2.31
+rawpy>=0.18
+Pillow>=10.0
