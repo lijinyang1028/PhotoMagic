@@ -17,17 +17,22 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from llm_handler import LLMClient
 from rt_processor import generate_pp3, run_rawtherapee, check_rt_cli
-import rawpy
 
-DEFAULT_SYSTEM_PROMPT = """你是一个专业的摄影后期处理顾问。请仔细观察我发给你的照片，根据画面内容、光线、构图等，给出最佳的RawTherapee后期参数建议。
+DEFAULT_SYSTEM_PROMPT = """你是一个专业的摄影后期处理顾问。请仔细观察我发给你的照片，根据画面内容、光线、构图等，给出最佳的 RawTherapee 后期参数建议。
 
-请严格返回一个JSON对象，不要包含任何其他文字。JSON应包含以下可选键（数值）：
-- "Exposure": 曝光补偿，范围 -3.0 到 3.0
-- "Contrast": 对比度，范围 -100 到 100
-- "Saturation": 饱和度，范围 -100 到 100
-- "Highlights": 高光恢复，范围 0 到 100
-- "Shadows": 阴影提亮，范围 0 到 100
-- "WhiteBalance": 对象，包含 "Temperature" (开尔文，例如5500) 和 "Tint" (色调，-5.0到5.0)
+请严格返回一个 JSON 对象，不要包含任何其他文字。可选键如下（数值，超出范围会被自动钳位）：
+- "exposure": 曝光补偿(EV)，-3.0 到 3.0
+- "contrast": 对比度，-100 到 100
+- "saturation": 饱和度，-100 到 100
+- "highlight_compr": 高光压缩，0 到 100
+- "shadow_compr": 阴影压缩，0 到 100
+- "highlights": 高光恢复，0 到 100
+- "shadows": 阴影提亮，0 到 100
+- "temperature": 色温(K)，2000 到 12000
+- "tint": 绿/品红倾向，0.5 到 2.0，1.0 为中性
+- "sharpen_amount": 锐化强度，0 到 200
+- "vibrance": 自然饱和度，0 到 100
+- "distortion": 镜头畸变校正，-1.0 到 1.0
 
 若某参数无需调整，可省略该键。"""
 

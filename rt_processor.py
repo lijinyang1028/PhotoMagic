@@ -4,55 +4,63 @@ RawTherapee 处理模块
 """
 import os
 import subprocess
-import tempfile
 import shutil
+
+# 参数表：友好名 -> (RT 段落, RT 键, 类型, 最小值, 最大值, 是否需要 Enabled=true)
+# 段落名与键名均依据 RawTherapee 源码 rtengine/procparams.cc
+PARAMS = {
+    "exposure":        ("Exposure",             "Compensation",   float, -3.0,   3.0, False),
+    "contrast":        ("Exposure",             "Contrast",       int,  -100,   100, False),
+    "saturation":      ("Exposure",             "Saturation",     int,  -100,   100, False),
+    "highlight_compr": ("Exposure",             "HighlightCompr", int,     0,   100, False),
+    "shadow_compr":    ("Exposure",             "ShadowCompr",    int,     0,   100, False),
+    "highlights":      ("Shadows & Highlights", "Highlights",     int,     0,   100, True),
+    "shadows":         ("Shadows & Highlights", "Shadows",        int,     0,   100, True),
+    "temperature":     ("White Balance",        "Temperature",    int,  2000, 12000, False),
+    "tint":            ("White Balance",        "Green",          float, 0.5,   2.0, False),
+    "sharpen_amount":  ("Sharpening",           "DeconvAmount",   int,     0,   200, True),
+    "vibrance":        ("Vibrance",             "Saturated",      int,     0,   100, True),
+    "distortion":      ("Distortion",           "Amount",         float, -1.0,   1.0, False),
+}
+
+# 某些段落除参数键外，还需要固定的伴随键才能按预期生效
+SECTION_DEFAULTS = {
+    "White Balance": [("Setting", "Custom")],   # 自定义白平衡才会采用 Temperature/Green
+    "Sharpening":    [("Method", "rld"), ("DeconvIterations", 40)],  # 反卷积锐化需迭代次数
+}
+
 
 def generate_pp3(params: dict, output_path: str):
     """
-    根据参数字典生成 RawTherapee 的 .pp3 配置文件
-    参数键名需与 RawTherapee 内部命名一致（可简化）
-    示例: {"Exposure": 1.2, "Contrast": 30, "Saturation": 10,
-          "WhiteBalance": {"Temperature": 5500, "Tint": 1.0}}
+    根据参数字典生成 RawTherapee 的 .pp3 配置文件。
+    只识别 PARAMS 中定义的键，其余忽略；数值会钳位到合法范围。
     """
-    lines = ["[Version]", "AppVersion=5.9", "Version=347"]
-    lines.append("")  # 空行分隔
+    sections = {}   # RT 段落名 -> 该段要写入的 (键, 值) 列表
+    enabled = set() # 需要 Enabled=true 的段落
 
-    # 曝光
-    if "Exposure" in params:
-        lines.append(f"[Exposure]")
-        lines.append(f"Exposure={params['Exposure']}")
+    for name, value in params.items():
+        spec = PARAMS.get(name)
+        if not spec:
+            continue  # 未定义的键直接忽略，避免写出无效配置
+        section, key, typ, lo, hi, need_enable = spec
+        try:
+            value = typ(max(lo, min(hi, value)))  # 钳位到 [lo, hi]
+        except (TypeError, ValueError):
+            continue  # 非法值跳过，不影响其它参数
+        sections.setdefault(section, []).append((key, value))
+        if need_enable:
+            enabled.add(section)
+
+    lines = ["[Version]", "AppVersion=5.9", "Version=347", ""]
+    for section, kvs in sections.items():
+        lines.append(f"[{section}]")
+        for key, val in SECTION_DEFAULTS.get(section, []):
+            lines.append(f"{key}={val}")
+        if section in enabled:
+            lines.append("Enabled=true")
+        for key, val in kvs:
+            lines.append(f"{key}={val}")
         lines.append("")
-
-    # 对比度 / 饱和度 (属于 Vibrance 或 Lab Adjustments)
-    if "Contrast" in params or "Saturation" in params:
-        lines.append("[Lab Adjustments]")
-        if "Contrast" in params:
-            lines.append(f"Contrast={params['Contrast']}")
-        if "Saturation" in params:
-            lines.append(f"Saturation={params['Saturation']}")
-        lines.append("")
-
-    # 白平衡
-    if "WhiteBalance" in params:
-        wb = params["WhiteBalance"]
-        lines.append("[White Balance]")
-        lines.append("Setting=Custom")
-        if "Temperature" in wb:
-            lines.append(f"Temperature={wb['Temperature']}")
-        if "Tint" in wb:
-            lines.append(f"Green={wb['Tint']}")  # 注意 RawTherapee 使用 Green
-        lines.append("")
-
-    # 高光/阴影 (通过 Shadow/Highlight 工具)
-    if "Highlights" in params or "Shadows" in params:
-        lines.append("[Shadows/Highlights]")
-        if "Highlights" in params:
-            lines.append(f"Highlights={params['Highlights']}")
-        if "Shadows" in params:
-            lines.append(f"Shadows={params['Shadows']}")
-        lines.append("")
-
-    # 更多参数可按需扩展...
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -74,7 +82,10 @@ def run_rawtherapee(input_raw: str, pp3_file: str, output_dir: str, jpeg_quality
         "-t",   # 忽略定向标签（避免旋转冲突，可选）
         input_raw
     ]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        # 把 RT 的报错信息带出来，否则日志只剩一个退出码，只能干瞪眼
+        raise RuntimeError(f"rawtherapee-cli 执行失败:\n{proc.stderr.strip()}")
 
 def check_rt_cli():
     """检查 rawtherapee-cli 是否可用"""

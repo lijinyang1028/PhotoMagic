@@ -4,6 +4,7 @@ LLM 调用模块
 """
 import base64
 import json
+import re
 import requests
 from io import BytesIO
 from PIL import Image
@@ -82,11 +83,17 @@ class LLMClient:
         data = resp.json()
         content = data["choices"][0]["message"]["content"].strip()
 
-        # 尝试解析 JSON（可能被包裹在 ```json ``` 中）
+        # 模型可能把 JSON 包在 ```json ``` 里，或前后夹带其它文字
+        # 这个地方用正则来筛，LLM存在幻觉，网络传输也有风险，所以的话使用更加鲁棒的
+        # 正则解析
         if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1])
+            content = content.split("```", 2)[1]
+            if content.startswith("json"):
+                content = content[4:]
+        match = re.search(r"\{.*\}", content, re.DOTALL)  # 取第一个 { 到最后一个 }
+        if not match:
+            raise ValueError(f"LLM 返回内容不是有效 JSON:\n{content}")
         try:
-            return json.loads(content)
+            return json.loads(match.group(0))
         except json.JSONDecodeError:
             raise ValueError(f"LLM 返回内容不是有效 JSON:\n{content}")
