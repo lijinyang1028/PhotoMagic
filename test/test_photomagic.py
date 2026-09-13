@@ -18,7 +18,7 @@ from unittest import mock
 
 import llm_handler
 from llm_handler import LLMClient
-from rt_processor import generate_pp3, run_rawtherapee, check_rt_cli, PARAMS
+from rt_processor import generate_pp3, run_rawtherapee, check_rt_cli, get_params
 
 
 def render(params):
@@ -91,7 +91,8 @@ class TestGeneratePP3(unittest.TestCase):
         self.assertIn("Enabled=true", out)
 
     def test_param_count_expanded(self):
-        self.assertGreater(len(PARAMS), 6)
+        #self.assertGreater(len(PARAMS), 6)
+        self.assertGreater(len(get_params()), 6)
 
 
 class TestRunRawTherapee(unittest.TestCase):

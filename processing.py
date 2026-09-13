@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QFont
 from PyQt6.QtCore import (
-    Qt, QThreadPool, QRunnable, QObject, pyqtSignal, QSize, QRect
+    Qt, QThreadPool, QRunnable, QObject, pyqtSignal, QSize, QRect, QPoint
 )
 
 from llm_handler import LLMClient, load_image_base64_from_raw
@@ -183,6 +183,162 @@ class CircleIconButton(QPushButton):
             p.drawRoundedRect(QRect(int(cx - 6), int(cy - 6), 12, 12), 2, 2)
 
 
+# ----------------------------- 前后对比视图 -----------------------------
+class BeforeAfterView(QWidget):
+    """拖动中缝对比原图/处理后"""
+    def __init__(self):
+        super().__init__()
+        self._original = None
+        self._processed = None
+        self._split = 0.5
+        self._dragging = False
+        self.is_dark = True
+        self.setMouseTracking(True)
+        self.setMinimumSize(320, 320)
+
+    def clear(self):
+        self._original = None
+        self._processed = None
+        self._split = 0.5
+        self.update()
+
+    def set_dark(self, is_dark):
+        self.is_dark = is_dark
+        self.update()
+
+    def set_original(self, pixmap):
+        self._original = pixmap
+        self.update()
+
+    def set_processed(self, pixmap):
+        self._processed = pixmap
+        self.update()
+
+    def _ref_pixmap(self):
+        if self._original is not None and not self._original.isNull():
+            return self._original
+        if self._processed is not None and not self._processed.isNull():
+            return self._processed
+        return None
+
+    def _fit_rect(self):
+        ref = self._ref_pixmap()
+        if ref is None:
+            return QRect()
+        w, h = self.width(), self.height()
+        pw, ph = ref.width(), ref.height()
+        if pw <= 0 or ph <= 0:
+            return QRect()
+        scale = min(w / pw, h / ph)
+        nw, nh = int(pw * scale), int(ph * scale)
+        return QRect((w - nw) // 2, (h - nh) // 2, nw, nh)
+
+    def _split_x(self, rect):
+        return rect.x() + int(rect.width() * self._split)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            rect = self._fit_rect()
+            if not rect.isNull():
+                self._dragging = True
+                self._set_split(e.position().x(), rect)
+                e.accept()
+                return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        rect = self._fit_rect()
+        if not rect.isNull():
+            hx = self._split_x(rect)
+            cy = rect.y() + rect.height() // 2
+            near = abs(e.position().x() - hx) < 16 and abs(e.position().y() - cy) < 30
+            self.setCursor(Qt.CursorShape.SizeHorCursor
+                           if (near or self._dragging)
+                           else Qt.CursorShape.ArrowCursor)
+            if self._dragging:
+                self._set_split(e.position().x(), rect)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._dragging = False
+        super().mouseReleaseEvent(e)
+
+    def _set_split(self, x, rect):
+        if rect.width() <= 0:
+            return
+        rel = (x - rect.x()) / rect.width()
+        self._split = max(0.0, min(1.0, rel))
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        bg = QColor("#202020") if self.is_dark else QColor("#f5f5f5")
+        p.fillRect(self.rect(), bg)
+
+        has_orig = self._original is not None and not self._original.isNull()
+        has_proc = self._processed is not None and not self._processed.isNull()
+
+        if not has_orig and not has_proc:
+            p.setPen(QColor("#808080"))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "未选择图片")
+            return
+
+        rect = self._fit_rect()
+        if rect.isNull():
+            return
+
+        if has_orig and has_proc:
+            sx = self._split_x(rect)
+
+            p.save()
+            p.setClipRect(QRect(rect.x(), rect.y(),
+                                max(0, sx - rect.x()), rect.height()))
+            p.drawPixmap(rect, self._original)
+            p.restore()
+
+            p.save()
+            p.setClipRect(QRect(sx, rect.y(),
+                                max(0, rect.right() - sx + 1), rect.height()))
+            p.drawPixmap(rect, self._processed)
+            p.restore()
+
+            p.setPen(QPen(QColor(255, 255, 255, 220), 2))
+            p.drawLine(sx, rect.y(), sx, rect.bottom())
+
+            cy = rect.y() + rect.height() // 2
+            p.setPen(QPen(QColor(0, 0, 0, 50), 1))
+            p.setBrush(QColor("white"))
+            p.drawEllipse(QPoint(sx, cy), 14, 14)
+            p.setPen(QPen(QColor("#333333"), 2, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
+            p.drawLine(sx - 6, cy, sx - 3, cy - 4)
+            p.drawLine(sx - 6, cy, sx - 3, cy + 4)
+            p.drawLine(sx + 6, cy, sx + 3, cy - 4)
+            p.drawLine(sx + 6, cy, sx + 3, cy + 4)
+
+            self._tag(p, QRect(rect.x() + 10, rect.y() + 10, 52, 22), "原图")
+            self._tag(p, QRect(rect.right() - 62, rect.y() + 10, 52, 22), "处理后")
+        elif has_orig:
+            p.drawPixmap(rect, self._original)
+            self._tag(p, QRect(rect.x() + 10, rect.y() + 10, 52, 22), "原图")
+        else:
+            p.drawPixmap(rect, self._processed)
+            self._tag(p, QRect(rect.right() - 62, rect.y() + 10, 52, 22), "处理后")
+
+    def _tag(self, p, r, text):
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 140))
+        p.drawRoundedRect(r, 4, 4)
+        p.setPen(QColor("white"))
+        f = p.font()
+        f.setPointSize(9)
+        p.setFont(f)
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+
+
 # ----------------------------- 列表 delegate -----------------------------
 class FileListDelegate(QStyledItemDelegate):
     StatusRole = Qt.ItemDataRole.UserRole + 1
@@ -283,8 +439,6 @@ class FileListDelegate(QStyledItemDelegate):
                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                          status)
 
-        # 右侧 BTN_AREA_W 区域预留，不画内容
-
         painter.restore()
 
 
@@ -384,10 +538,9 @@ class ProcessingWidget(QWidget):
             self._scan_visible)
         list_preview_layout.addWidget(self.file_list_widget, 1)
 
-        self.preview_label = QLabel("未选择图片")
-        self.preview_label.setFixedSize(320, 320)
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        list_preview_layout.addWidget(self.preview_label)
+        self.preview_view = BeforeAfterView()
+        self.preview_view.setFixedSize(320, 320)
+        list_preview_layout.addWidget(self.preview_view)
 
         f_layout.addLayout(list_preview_layout)
         layout.addWidget(file_group)
@@ -451,20 +604,10 @@ class ProcessingWidget(QWidget):
         log_layout.addWidget(self.log_edit)
         layout.addWidget(log_group)
 
-        self._style_preview()
-
     def set_dark(self, is_dark):
         self.is_dark = is_dark
-        self._style_preview()
+        self.preview_view.set_dark(is_dark)
         self.file_list_widget.viewport().update()
-
-    def _style_preview(self):
-        if self.is_dark:
-            self.preview_label.setStyleSheet(
-                "border: 1px solid #3a3a3a; background: #202020; color: #808080;")
-        else:
-            self.preview_label.setStyleSheet(
-                "border: 1px solid #d0d0d0; background: #fafafa; color: #808080;")
 
     def get_llm_client(self):
         api_key = self.api_key_edit.text().strip()
@@ -548,43 +691,56 @@ class ProcessingWidget(QWidget):
         self._thumb_cache.clear()
         self._thumb_loading.clear()
         self.failed_paths.clear()
+        self._preview_file = None
         self.btn_retry.setEnabled(False)
-        self.preview_label.clear()
-        self.preview_label.setText("未选择图片")
+        self.preview_view.clear()
 
+    # ---------------- 预览 / 对比 ----------------
     def update_preview(self, row):
         if row < 0 or row >= self.file_list_widget.count():
             self._preview_file = None
-            self.preview_label.clear()
-            self.preview_label.setText("未选择图片")
+            self.preview_view.clear()
             return
         item = self.file_list_widget.item(row)
         f = item.data(Qt.ItemDataRole.UserRole)
-        self._preview_file = f
-        cached = self._thumb_cache.get(f)
-        if cached is not None and not cached.isNull() and cached.width() >= 400:
-            self._on_preview_loaded(f, cached)
+        if f == self._preview_file:
             return
-        self.preview_label.setText("加载中...")
-        task = ImageLoadTask(f, (640, 640))
-        task.signals.loaded.connect(self._on_preview_loaded)
+        self._preview_file = f
+        self.preview_view.clear()
+
+        task = ImageLoadTask(f, (800, 800))
+        task.signals.loaded.connect(self._on_preview_original_loaded)
         task.signals.failed.connect(self._on_preview_failed)
         self.thumb_pool.start(task)
 
-    def _on_preview_loaded(self, file_path, pixmap):
+        self._load_processed_preview(f)
+
+    def _load_processed_preview(self, raw_path):
+        stem = Path(raw_path).stem
+        out_dir = self.out_dir_edit.text().strip() or self.output_dir
+        out_path = os.path.join(out_dir, f"{stem}.jpg")
+        if not os.path.exists(out_path):
+            self.preview_view.set_processed(None)
+            return
+        task = ImageLoadTask(out_path, (800, 800))
+        task.signals.loaded.connect(self._on_preview_processed_loaded)
+        task.signals.failed.connect(self._on_preview_failed)
+        self.thumb_pool.start(task)
+
+    def _on_preview_original_loaded(self, file_path, pixmap):
         if file_path != self._preview_file:
             return
-        self.preview_label.setPixmap(pixmap.scaled(
-            self.preview_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation))
-        self.preview_label.setText("")
+        self.preview_view.set_original(pixmap)
+
+    def _on_preview_processed_loaded(self, file_path, pixmap):
+        if self._preview_file is None:
+            return
+        if Path(file_path).stem != Path(self._preview_file).stem:
+            return
+        self.preview_view.set_processed(pixmap)
 
     def _on_preview_failed(self, file_path, err):
-        if file_path != self._preview_file:
-            return
-        self.preview_label.clear()
-        self.preview_label.setText(f"预览失败: {err}")
+        pass
 
     def browse_output(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
@@ -677,6 +833,8 @@ class ProcessingWidget(QWidget):
         self.completed_count += 1
         if success:
             self._set_item_status(file_path, "完成", COLOR_DONE)
+            if file_path == self._preview_file:
+                self._load_processed_preview(file_path)
         elif message == "已取消":
             self._set_item_status(file_path, "已取消", COLOR_CANCEL)
         else:
