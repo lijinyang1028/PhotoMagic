@@ -8,12 +8,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtCore import Qt
 
-from processing import ProcessingWidget
-from image_review import ImageReviewWidget
-from rt_processor import check_rt_cli
+from processing import ProcessingWidget     #处理页
+from image_review import ImageReviewWidget     #图片评价
+from rt_processor import check_rt_cli   #RT处理
+from about import AboutWidget    #关于页
 
 
-NAV_ITEMS = ["处理", "照片评价", "标签 2", "标签 3"]
+NAV_ITEMS = ["处理", "照片评价", "标签 2", "关于"]
 
 
 class MainWindow(QMainWindow):
@@ -78,10 +79,11 @@ class MainWindow(QMainWindow):
 
         self.processing_widget = ProcessingWidget()
         self.review_widget = ImageReviewWidget(self.processing_widget.get_llm_client)
+        self.about_widget = AboutWidget()
         self.stack.addWidget(self.processing_widget)
         self.stack.addWidget(self.review_widget)
         self.stack.addWidget(QWidget())
-        self.stack.addWidget(QWidget())
+        self.stack.addWidget(self.about_widget)
 
     def apply_theme(self, scheme=None):
         if scheme is None:
@@ -162,6 +164,9 @@ class MainWindow(QMainWindow):
                 height: 0px;
                 background: none;
             }
+            #aboutSubtitle { color: #a0a0a0; }
+            #aboutRole { color: #a0a0a0; font-size: 11px; }
+            #aboutBio { color: #c0c0c0; font-size: 12px; }
             """
         else:
             qss = """
@@ -237,6 +242,9 @@ class MainWindow(QMainWindow):
                 height: 0px;
                 background: none;
             }
+            #aboutSubtitle { color: #666666; }
+            #aboutRole { color: #888888; font-size: 11px; }
+            #aboutBio { color: #444444; font-size: 12px; }
             """
         self.setStyleSheet(qss)
 
@@ -244,6 +252,8 @@ class MainWindow(QMainWindow):
             self.processing_widget.set_dark(is_dark)
         if hasattr(self, "review_widget"):
             self.review_widget.set_dark(is_dark)
+        if hasattr(self, "about_widget"):
+            self.about_widget.set_dark(is_dark)
 
     def toggle_sidebar(self):
         sizes = self.splitter.sizes()
