@@ -5,20 +5,18 @@
 import sys
 import os
 import json
-import base64
+import threading
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QLineEdit, QFileDialog,
-    QListWidget, QMessageBox, QGroupBox, QFormLayout,
-    QProgressBar, QStackedWidget, QSplitter
+    QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
+    QProgressBar, QCheckBox
 )
-from PyQt6.QtGui import QPixmap, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from llm_handler import LLMClient, load_image_base64_from_raw
+from llm_handler import LLMClient
 from rt_processor import generate_pp3, run_rawtherapee, check_rt_cli
-from image_review import ImageReviewWidget     #这是评价模块
 
 DEFAULT_SYSTEM_PROMPT = """你是一个专业的摄影后期处理顾问。请仔细观察我发给你的照片，根据画面内容、光线、构图等，给出最佳的 RawTherapee 后期参数建议。
 
@@ -40,7 +38,6 @@ DEFAULT_SYSTEM_PROMPT = """你是一个专业的摄影后期处理顾问。请�
 
 DEFAULT_USER_PROMPT = "请为这张照片建议最佳后期参数。"
 
-
 class ProcessingThread(QThread):
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
@@ -59,107 +56,52 @@ class ProcessingThread(QThread):
         for idx, raw_path in enumerate(self.file_list):
             self.log.emit(f"正在处理: {os.path.basename(raw_path)}")
             try:
+                # 1. 获取 LLM 处理参数
                 params = self.llm_client.request_json(
                     self.system_prompt, self.user_prompt, raw_path)
                 self.log.emit(f"  LLM 返回参数: {json.dumps(params, ensure_ascii=False)}")
 
+                # 2. 生成 .pp3 文件
                 pp3_path = os.path.join(self.output_dir, f"{Path(raw_path).stem}.pp3")
                 generate_pp3(params, pp3_path)
 
+                # 3. 调用 RawTherapee 处理
                 run_rawtherapee(raw_path, pp3_path, self.output_dir)
                 self.log.emit(f"  已完成: {Path(raw_path).stem}.jpg")
 
             except Exception as e:
                 self.log.emit(f"  错误: {str(e)}")
 
+            # 更新进度
             self.progress.emit(int((idx + 1) / total * 100))
 
         self.log.emit("全部处理完成！")
         self.finished.emit()
 
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RAW 照片 AI 处理助手")
-        self.resize(1100, 760)
+        self.setWindowTitle("RAW 照片 AI 处理助手 (基于 RawTherapee)")
+        self.resize(900, 700)
 
+        # 默认输出目录
         self.default_output = os.path.join(os.path.expanduser("~"), "rawtherapee_output")
         os.makedirs(self.default_output, exist_ok=True)
 
-        self.file_list = []
+        self.file_list = []      # 实际 RAW 文件路径列表
         self.output_dir = self.default_output
         self.llm_client = None
         self.worker = None
-        self.sidebar_expanded_width = 240
 
         self.init_ui()
-        self.apply_theme()
-        QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)
         self.check_dependencies()
-        #下面的是评价模块调用
-    def get_llm_client(self):
-        api_key = self.api_key_edit.text().strip()
-        if not api_key:
-            return None
-        return LLMClient(
-            api_base=self.api_base_edit.text().strip(),
-            api_key=api_key,
-            model=self.model_edit.text().strip()
-        )
 
     def init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        layout = QVBoxLayout(central)
 
-        top_bar = QWidget()
-        top_bar.setFixedHeight(48)
-        top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(12, 0, 12, 0)
-        top_layout.setSpacing(12)
-
-        self.btn_toggle = QPushButton("☰")
-        self.btn_toggle.setFixedSize(32, 32)
-        self.btn_toggle.setObjectName("toggleBtn")
-        self.btn_toggle.clicked.connect(self.toggle_sidebar)
-        top_layout.addWidget(self.btn_toggle)
-
-        self.title_label = QLabel("处理")
-        self.title_label.setObjectName("titleLabel")
-        top_layout.addWidget(self.title_label)
-        top_layout.addStretch()
-        root.addWidget(top_bar)
-
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setHandleWidth(1)
-        self.splitter.setChildrenCollapsible(True)
-        root.addWidget(self.splitter)
-
-        sidebar_widget = QWidget()
-        sidebar_layout = QVBoxLayout(sidebar_widget)
-        sidebar_layout.setContentsMargins(8, 8, 8, 8)
-
-        self.sidebar = QListWidget()
-        self.sidebar.setObjectName("sidebar")
-        self.sidebar.addItems(["处理", "照片评价", "标签 2", "标签 3"])
-        self.sidebar.setCurrentRow(0)
-        self.sidebar.currentRowChanged.connect(self.on_nav_changed)
-        sidebar_layout.addWidget(self.sidebar)
-
-        self.splitter.addWidget(sidebar_widget)
-
-        self.stack = QStackedWidget()
-        self.splitter.addWidget(self.stack)
-        self.splitter.setStretchFactor(0, 0)
-        self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([self.sidebar_expanded_width, 860])
-
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
+        # 1. 文件选择区域
         file_group = QGroupBox("1. 选择 RAW 照片")
         f_layout = QVBoxLayout(file_group)
         btn_layout = QHBoxLayout()
@@ -171,20 +113,11 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_clear)
         btn_layout.addStretch()
         f_layout.addLayout(btn_layout)
-
-        list_preview_layout = QHBoxLayout()
         self.file_list_widget = QListWidget()
-        self.file_list_widget.currentRowChanged.connect(self.update_preview)
-        list_preview_layout.addWidget(self.file_list_widget, 1)
-
-        self.preview_label = QLabel("未选择图片")
-        self.preview_label.setFixedSize(320, 320)
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        list_preview_layout.addWidget(self.preview_label)
-
-        f_layout.addLayout(list_preview_layout)
+        f_layout.addWidget(self.file_list_widget)
         layout.addWidget(file_group)
 
+        # 2. LLM 配置区域
         llm_group = QGroupBox("2. LLM 配置 (OpenAI 兼容接口)")
         llm_layout = QFormLayout(llm_group)
         self.api_base_edit = QLineEdit("https://api.openai.com/v1")
@@ -196,6 +129,7 @@ class MainWindow(QMainWindow):
         llm_layout.addRow("Model:", self.model_edit)
         layout.addWidget(llm_group)
 
+        # 3. Prompt 区域
         prompt_group = QGroupBox("3. 提示词设置")
         prompt_layout = QFormLayout(prompt_group)
         self.system_prompt_edit = QTextEdit()
@@ -206,6 +140,7 @@ class MainWindow(QMainWindow):
         prompt_layout.addRow("User Prompt:", self.user_prompt_edit)
         layout.addWidget(prompt_group)
 
+        # 4. 输出设置
         out_group = QGroupBox("4. 输出设置")
         out_layout = QHBoxLayout(out_group)
         out_layout.addWidget(QLabel("输出目录:"))
@@ -216,6 +151,7 @@ class MainWindow(QMainWindow):
         out_layout.addWidget(self.btn_browse)
         layout.addWidget(out_group)
 
+        # 5. 操作按钮与进度
         action_layout = QHBoxLayout()
         self.btn_process = QPushButton("开始处理")
         self.btn_process.clicked.connect(self.start_processing)
@@ -224,6 +160,7 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.progress_bar)
         layout.addLayout(action_layout)
 
+        # 6. 日志区域
         log_group = QGroupBox("处理日志")
         log_layout = QVBoxLayout(log_group)
         self.log_edit = QTextEdit()
@@ -231,61 +168,8 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_edit)
         layout.addWidget(log_group)
 
-        self.stack.addWidget(page)
-        self.review_widget = ImageReviewWidget(self.get_llm_client)
-        self.stack.addWidget(self.review_widget)
-        self.stack.addWidget(QWidget())
-        self.stack.addWidget(QWidget())
-
-    def apply_theme(self, scheme=None):
-        if scheme is None:
-            scheme = QGuiApplication.styleHints().colorScheme()
-        is_dark = scheme == Qt.ColorScheme.Dark
-        if hasattr(self, "review_widget"):
-            self.review_widget.set_dark(is_dark)
-
-        if is_dark:
-            qss = """
-            QMainWindow, QWidget { background: #191919; color: #ffffff; }
-            #toggleBtn { background: transparent; border: none; color: #ffffff; font-size: 18px; border-radius: 4px; }
-            #toggleBtn:hover { background: #2d2d2d; }
-            #titleLabel { font-size: 14px; font-weight: 600; color: #ffffff; }
-            QSplitter::handle { background: #333333; }
-            QListWidget#sidebar { background: #202020; border: none; outline: none; padding: 4px; }
-            QListWidget#sidebar::item { height: 40px; padding-left: 16px; border-radius: 6px; color: #ffffff; }
-            QListWidget#sidebar::item:hover { background: #2d2d2d; }
-            QListWidget#sidebar::item:selected { background: #333333; }
-            """
-        else:
-            qss = """
-            QMainWindow, QWidget { background: #f3f3f3; color: #1b1b1b; }
-            #toggleBtn { background: transparent; border: none; color: #1b1b1b; font-size: 18px; border-radius: 4px; }
-            #toggleBtn:hover { background: #e6e6e6; }
-            #titleLabel { font-size: 14px; font-weight: 600; color: #1b1b1b; }
-            QSplitter::handle { background: #d0d0d0; }
-            QListWidget#sidebar { background: #f9f9f9; border: none; outline: none; padding: 4px; }
-            QListWidget#sidebar::item { height: 40px; padding-left: 16px; border-radius: 6px; color: #1b1b1b; }
-            QListWidget#sidebar::item:hover { background: #e6e6e6; }
-            QListWidget#sidebar::item:selected { background: #ffffff; color: #0067c0; }
-            """
-        self.setStyleSheet(qss)
-
-    def toggle_sidebar(self):
-        sizes = self.splitter.sizes()
-        if sizes[0] > 0:
-            self.sidebar_expanded_width = sizes[0]
-            self.splitter.setSizes([0, sizes[1] + sizes[0]])
-        else:
-            self.splitter.setSizes([self.sidebar_expanded_width, sizes[1] - self.sidebar_expanded_width])
-
-    def on_nav_changed(self, row):
-        if 0 <= row < self.stack.count():
-            self.stack.setCurrentIndex(row)
-        titles = ["处理", "照片评价", "标签 2", "标签 3"]
-        if 0 <= row < len(titles) and hasattr(self, "title_label"):
-            self.title_label.setText(titles[row])
-
     def check_dependencies(self):
+        """检查 RawTherapee 是否已安装"""
         if not check_rt_cli():
             QMessageBox.warning(self, "依赖缺失",
                 "未检测到 rawtherapee-cli，请安装 RawTherapee 并将其路径添加到环境变量。")
@@ -303,31 +187,10 @@ class MainWindow(QMainWindow):
                 if f not in self.file_list:
                     self.file_list.append(f)
                     self.file_list_widget.addItem(f)
-            if self.file_list_widget.currentRow() < 0 and self.file_list:
-                self.file_list_widget.setCurrentRow(0)
 
     def clear_files(self):
         self.file_list.clear()
         self.file_list_widget.clear()
-
-    def update_preview(self, row):
-        if row < 0 or row >= len(self.file_list):
-            self.preview_label.clear()
-            self.preview_label.setText("未选择图片")
-            return
-        try:
-            b64 = load_image_base64_from_raw(self.file_list[row])
-            pix = QPixmap()
-            if not pix.loadFromData(base64.b64decode(b64), "JPEG"):
-                raise ValueError("无法解码图片")
-            self.preview_label.setPixmap(pix.scaled(
-                self.preview_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
-            self.preview_label.setText("")
-        except Exception as e:
-            self.preview_label.clear()
-            self.preview_label.setText(f"预览失败: {e}")
 
     def browse_output(self):
         dir = QFileDialog.getExistingDirectory(self, "选择输出目录")
@@ -347,6 +210,7 @@ class MainWindow(QMainWindow):
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir, exist_ok=True)
 
+        # 创建 LLM 客户端
         self.llm_client = LLMClient(
             api_base=self.api_base_edit.text().strip(),
             api_key=self.api_key_edit.text().strip(),
@@ -356,6 +220,7 @@ class MainWindow(QMainWindow):
         self.log_edit.clear()
         self.btn_process.setEnabled(False)
 
+        # 开启处理线程
         self.worker = ProcessingThread(
             file_list=self.file_list.copy(),
             output_dir=self.output_dir,
@@ -375,14 +240,11 @@ class MainWindow(QMainWindow):
         self.btn_process.setEnabled(True)
         self.worker = None
 
-
 def main():
     app = QApplication(sys.argv)
-    app.setStyle("fusion")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
