@@ -8,7 +8,8 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
     QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QMessageBox,
-    QGroupBox, QFormLayout, QProgressBar, QStyledItemDelegate, QStyle
+    QGroupBox, QFormLayout, QProgressBar, QStyledItemDelegate, QStyle,
+    QComboBox, QSpinBox
 )
 
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QFont
@@ -17,26 +18,30 @@ from PyQt6.QtCore import (
 )
 
 from llm_handler import LLMClient, load_image_base64_from_raw
-from rt_processor import generate_pp3, run_rawtherapee
+from rt_processor import (
+    generate_pp3, run_rawtherapee,
+    describe_params_for_prompt, reload_params, get_params,
+    get_builtin_param_names, merge_params,
+    load_custom_params, save_custom_params,
+    autoload_custom_params, clear_custom_params,
+)
 
 
-DEFAULT_SYSTEM_PROMPT = """你是一个专业的摄影后期处理顾问。请仔细观察我发给你的照片，根据画面内容、光线、构图等，给出最佳的 RawTherapee 后期参数建议。
+SYSTEM_PROMPT_HEADER = """你是一个专业的摄影后期处理顾问。请仔细观察我发给你的照片，结合拍摄参数和画面内容，给出最佳的 RawTherapee 后期参数建议。
 
-请严格返回一个 JSON 对象，不要包含任何其他文字。可选键如下（数值，超出范围会被自动钳位）：
-- "exposure": 曝光补偿(EV)，-3.0 到 3.0
-- "contrast": 对比度，-100 到 100
-- "saturation": 饱和度，-100 到 100
-- "highlight_compr": 高光压缩，0 到 100
-- "shadow_compr": 阴影压缩，0 到 100
-- "highlights": 高光恢复，0 到 100
-- "shadows": 阴影提亮，0 到 100
-- "temperature": 色温(K)，2000 到 12000
-- "tint": 绿/品红倾向，0.5 到 2.0，1.0 为中性
-- "sharpen_amount": 锐化强度，0 到 200
-- "vibrance": 自然饱和度，0 到 100
-- "distortion": 镜头畸变校正，-1.0 到 1.0
+请严格返回一个 JSON 对象，不要包含任何其他文字。可选键如下（数值，超出范围会被自动钳位）："""
 
+SYSTEM_PROMPT_FOOTER = """
 若某参数无需调整，可省略该键。"""
+
+
+def build_system_prompt() -> str:
+    return (SYSTEM_PROMPT_HEADER
+            + "\n"
+            + describe_params_for_prompt()
+            + "\n"
+            + SYSTEM_PROMPT_FOOTER)
+
 
 DEFAULT_USER_PROMPT = "请为这张照片建议最佳后期参数。"
 
@@ -57,6 +62,11 @@ COLOR_RUNNING = "#2d8cf0"
 COLOR_DONE = "#4caf50"
 COLOR_FAIL = "#f44336"
 COLOR_CANCEL = "#808080"
+
+FORMAT_MAP = {0: "jpg", 1: "tiff", 2: "png"}
+FORMAT_EXT = {"jpg": "jpg", "tiff": "tif", "png": "png"}
+DEPTH_MAP = {0: "8", 1: "16", 2: "16f", 3: "32"}
+CS_MAP = {0: "RT_sRGB", 1: "RT_Medium_GSH_2.4", 2: "RT_Large_gsRGB"}
 
 
 # ----------------------------- 后台任务 -----------------------------
@@ -90,7 +100,9 @@ class ProcessTask(QRunnable):
         finished = pyqtSignal(str, bool, str)
 
     def __init__(self, raw_path, output_dir, llm_client,
-                 system_prompt, user_prompt, stop_event):
+                 system_prompt, user_prompt, stop_event,
+                 output_format="jpg", jpeg_quality=92,
+                 bit_depth="16", output_profile="RT_sRGB"):
         super().__init__()
         self.raw_path = raw_path
         self.output_dir = output_dir
@@ -98,6 +110,10 @@ class ProcessTask(QRunnable):
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
         self.stop_event = stop_event
+        self.output_format = output_format
+        self.jpeg_quality = jpeg_quality
+        self.bit_depth = bit_depth
+        self.output_profile = output_profile
         self.signals = ProcessTask.Signals()
 
     def run(self):
@@ -117,11 +133,17 @@ class ProcessTask(QRunnable):
                 self.signals.finished.emit(self.raw_path, False, "已取消")
                 return
 
-            pp3_path = os.path.join(self.output_dir,
-                                    f"{Path(self.raw_path).stem}.pp3")
-            generate_pp3(params, pp3_path)
-            run_rawtherapee(self.raw_path, pp3_path, self.output_dir)
-            self.signals.log.emit(f"  已完成: {Path(self.raw_path).stem}.jpg")
+            stem = Path(self.raw_path).stem
+            pp3_path = os.path.join(self.output_dir, f"{stem}.pp3")
+            generate_pp3(params, pp3_path, output_profile=self.output_profile)
+            run_rawtherapee(
+                self.raw_path, pp3_path, self.output_dir,
+                output_format=self.output_format,
+                jpeg_quality=self.jpeg_quality,
+                bit_depth=self.bit_depth,
+            )
+            ext = FORMAT_EXT.get(self.output_format, "jpg")
+            self.signals.log.emit(f"  已完成: {stem}.{ext}")
             self.signals.finished.emit(self.raw_path, True, "完成")
         except Exception as e:
             self.signals.log.emit(f"  错误: {str(e)}")
@@ -372,7 +394,6 @@ class FileListDelegate(QStyledItemDelegate):
 
         path = index.data(Qt.ItemDataRole.UserRole)
 
-        # 复选框
         cb_size = 16
         cb_rect = QRect(rect.left() + 14,
                         rect.top() + (rect.height() - cb_size) // 2,
@@ -395,7 +416,6 @@ class FileListDelegate(QStyledItemDelegate):
             painter.drawLine(cb_rect.center().x() - 1, cb_rect.bottom() - 3,
                              cb_rect.right() - 3, cb_rect.top() + 3)
 
-        # 缩略图
         thumb_x = cb_rect.right() + 14
         thumb_rect = QRect(thumb_x,
                            rect.top() + (rect.height() - THUMB_H) // 2,
@@ -414,7 +434,6 @@ class FileListDelegate(QStyledItemDelegate):
             painter.setBrush(ph_bg)
             painter.drawRoundedRect(thumb_rect, 6, 6)
 
-        # 文件名 + 状态
         info_x = thumb_rect.right() + 14
         info_w = rect.right() - BTN_AREA_W - info_x
         if info_w < 40:
@@ -504,6 +523,9 @@ class ProcessingWidget(QWidget):
         self.process_pool = QThreadPool()
         self.process_pool.setMaxThreadCount(MAX_PARALLEL)
 
+        # 启动时自动加载自定义参数（若存在）
+        self._custom_loaded, self._custom_errors = autoload_custom_params()
+
         self.init_ui()
 
     # ---------------- UI ----------------
@@ -559,22 +581,87 @@ class ProcessingWidget(QWidget):
         prompt_group = QGroupBox("3. 提示词设置")
         prompt_layout = QFormLayout(prompt_group)
         self.system_prompt_edit = QTextEdit()
-        self.system_prompt_edit.setPlainText(DEFAULT_SYSTEM_PROMPT)
+        self.system_prompt_edit.setPlainText(build_system_prompt())
         self.system_prompt_edit.setMaximumHeight(160)
         prompt_layout.addRow("System Prompt:", self.system_prompt_edit)
         self.user_prompt_edit = QLineEdit(DEFAULT_USER_PROMPT)
         prompt_layout.addRow("User Prompt:", self.user_prompt_edit)
+
+        reload_row = QHBoxLayout()
+        self.btn_reload_schema = QPushButton("重载内置参数")
+        self.btn_reload_schema.setToolTip(
+            "修改 params_schema.json 后点击，重新生成 System Prompt（保留自定义）")
+        self.btn_reload_schema.clicked.connect(self.reload_schema)
+        reload_row.addWidget(self.btn_reload_schema)
+
+        self.btn_import_params = QPushButton("导入自定义 JSON")
+        self.btn_import_params.setToolTip(
+            "从外部 JSON 文件补充参数定义，可叠加多次导入")
+        self.btn_import_params.clicked.connect(self.import_custom_params)
+        reload_row.addWidget(self.btn_import_params)
+
+        self.btn_clear_params = QPushButton("清空自定义")
+        self.btn_clear_params.setToolTip("移除所有已导入的自定义参数")
+        self.btn_clear_params.clicked.connect(self.clear_custom)
+        reload_row.addWidget(self.btn_clear_params)
+
+        reload_row.addStretch()
+        prompt_layout.addRow("", reload_row)
+
+        self.lbl_reload_hint = QLabel("")
+        self.lbl_reload_hint.setObjectName("reloadHint")
+        self.lbl_reload_hint.setWordWrap(True)
+        prompt_layout.addRow("", self.lbl_reload_hint)
+
         layout.addWidget(prompt_group)
 
         out_group = QGroupBox("4. 输出设置")
-        out_layout = QHBoxLayout(out_group)
-        out_layout.addWidget(QLabel("输出目录:"))
+        out_form = QFormLayout(out_group)
+
+        dir_row = QHBoxLayout()
         self.out_dir_edit = QLineEdit(self.output_dir)
-        out_layout.addWidget(self.out_dir_edit)
+        dir_row.addWidget(self.out_dir_edit, 1)
         self.btn_browse = QPushButton("浏览")
         self.btn_browse.clicked.connect(self.browse_output)
-        out_layout.addWidget(self.btn_browse)
+        dir_row.addWidget(self.btn_browse)
+        out_form.addRow("输出目录:", dir_row)
+
+        fmt_row = QHBoxLayout()
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["JPEG (.jpg)", "TIFF (.tif)", "PNG (.png)"])
+        fmt_row.addWidget(self.format_combo)
+
+        fmt_row.addWidget(QLabel("位深:"))
+        self.bit_depth_combo = QComboBox()
+        self.bit_depth_combo.addItems(["8", "16", "16f", "32"])
+        self.bit_depth_combo.setCurrentIndex(1)
+        fmt_row.addWidget(self.bit_depth_combo)
+
+        fmt_row.addWidget(QLabel("JPEG 质量:"))
+        self.quality_spin = QSpinBox()
+        self.quality_spin.setRange(1, 100)
+        self.quality_spin.setValue(92)
+        fmt_row.addWidget(self.quality_spin)
+        fmt_row.addStretch()
+        out_form.addRow("格式:", fmt_row)
+
+        cs_row = QHBoxLayout()
+        self.color_space_combo = QComboBox()
+        self.color_space_combo.addItems(["sRGB", "Adobe RGB", "ProPhoto RGB"])
+        cs_row.addWidget(self.color_space_combo)
+
+        cs_row.addWidget(QLabel("并发数:"))
+        self.parallel_spin = QSpinBox()
+        self.parallel_spin.setRange(1, 16)
+        self.parallel_spin.setValue(MAX_PARALLEL)
+        cs_row.addWidget(self.parallel_spin)
+        cs_row.addStretch()
+        out_form.addRow("色彩空间:", cs_row)
+
         layout.addWidget(out_group)
+
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self._on_format_changed(0)
 
         action_layout = QHBoxLayout()
         self.btn_process = CircleIconButton(CircleIconButton.PLAY, "#2563eb")
@@ -604,10 +691,82 @@ class ProcessingWidget(QWidget):
         log_layout.addWidget(self.log_edit)
         layout.addWidget(log_group)
 
+        # 显示自动加载自定义参数的结果
+        if self._custom_loaded:
+            msg = f"已自动加载 {self._custom_loaded} 个自定义参数"
+            if self._custom_errors:
+                msg += f"，{len(self._custom_errors)} 个被跳过"
+            self.lbl_reload_hint.setText(msg)
+        elif self._custom_errors:
+            self.lbl_reload_hint.setText(
+                "自定义参数文件有问题：" + self._custom_errors[0])
+
     def set_dark(self, is_dark):
         self.is_dark = is_dark
         self.preview_view.set_dark(is_dark)
         self.file_list_widget.viewport().update()
+
+    def _on_format_changed(self, index):
+        is_jpeg = (index == 0)
+        self.quality_spin.setEnabled(is_jpeg)
+        self.bit_depth_combo.setEnabled(not is_jpeg)
+
+    # ---------------- 参数表管理 ----------------
+    def reload_schema(self):
+        """重新读取内置 params_schema.json，保留已导入的自定义参数。"""
+        try:
+            builtin_names = get_builtin_param_names()
+            custom_snapshot = {
+                k: v for k, v in get_params().items()
+                if k not in builtin_names
+            }
+            reload_params()
+            if custom_snapshot:
+                merge_params(custom_snapshot)
+
+            self.system_prompt_edit.setPlainText(build_system_prompt())
+            self.lbl_reload_hint.setText(
+                f"已重载内置参数，自定义参数保留 {len(custom_snapshot)} 个")
+        except Exception as e:
+            self.lbl_reload_hint.setText(f"重载失败: {e}")
+
+    def import_custom_params(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择参数定义 JSON", "", "JSON 文件 (*.json);;所有文件 (*)")
+        if not path:
+            return
+
+        count, errors = load_custom_params(path)
+        if count == 0:
+            QMessageBox.warning(
+                self, "导入失败",
+                "没有有效的参数被导入。\n\n" + "\n".join(errors[:5]))
+            self.lbl_reload_hint.setText(
+                f"导入失败：{errors[0] if errors else '未知错误'}")
+            return
+
+        try:
+            save_custom_params()
+        except Exception as e:
+            self.lbl_reload_hint.setText(f"导入成功，但持久化失败: {e}")
+        else:
+            if errors:
+                self.lbl_reload_hint.setText(
+                    f"已导入 {count} 个参数（{len(errors)} 个被跳过，"
+                    f"首个错误：{errors[0]}）")
+            else:
+                self.lbl_reload_hint.setText(f"已导入 {count} 个参数")
+
+        self.system_prompt_edit.setPlainText(build_system_prompt())
+
+    def clear_custom(self):
+        if QMessageBox.question(
+                self, "确认", "移除所有已导入的自定义参数？"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        clear_custom_params()
+        self.system_prompt_edit.setPlainText(build_system_prompt())
+        self.lbl_reload_hint.setText("已清空自定义参数")
 
     def get_llm_client(self):
         api_key = self.api_key_edit.text().strip()
@@ -718,10 +877,24 @@ class ProcessingWidget(QWidget):
     def _load_processed_preview(self, raw_path):
         stem = Path(raw_path).stem
         out_dir = self.out_dir_edit.text().strip() or self.output_dir
-        out_path = os.path.join(out_dir, f"{stem}.jpg")
-        if not os.path.exists(out_path):
+
+        fmt = FORMAT_MAP.get(self.format_combo.currentIndex(), "jpg")
+        candidates = [FORMAT_EXT.get(fmt, "jpg")]
+        for v in FORMAT_EXT.values():
+            if v not in candidates:
+                candidates.append(v)
+
+        out_path = None
+        for ext in candidates:
+            p = os.path.join(out_dir, f"{stem}.{ext}")
+            if os.path.exists(p):
+                out_path = p
+                break
+
+        if out_path is None:
             self.preview_view.set_processed(None)
             return
+
         task = ImageLoadTask(out_path, (800, 800))
         task.signals.loaded.connect(self._on_preview_processed_loaded)
         task.signals.failed.connect(self._on_preview_failed)
@@ -783,6 +956,13 @@ class ProcessingWidget(QWidget):
         os.makedirs(self.output_dir, exist_ok=True)
         llm_client = self.get_llm_client()
 
+        output_format = FORMAT_MAP.get(self.format_combo.currentIndex(), "jpg")
+        bit_depth = DEPTH_MAP.get(self.bit_depth_combo.currentIndex(), "16")
+        output_profile = CS_MAP.get(self.color_space_combo.currentIndex(), "RT_sRGB")
+        jpeg_quality = self.quality_spin.value()
+
+        self.process_pool.setMaxThreadCount(self.parallel_spin.value())
+
         self.stop_event.clear()
         self.processing = True
         self.completed_count = 0
@@ -804,8 +984,14 @@ class ProcessingWidget(QWidget):
         user_prompt = self.user_prompt_edit.text()
 
         for raw_path in targets:
-            task = ProcessTask(raw_path, self.output_dir, llm_client,
-                              system_prompt, user_prompt, self.stop_event)
+            task = ProcessTask(
+                raw_path, self.output_dir, llm_client,
+                system_prompt, user_prompt, self.stop_event,
+                output_format=output_format,
+                jpeg_quality=jpeg_quality,
+                bit_depth=bit_depth,
+                output_profile=output_profile,
+            )
             task.signals.started.connect(self._on_task_started)
             task.signals.log.connect(self.log_edit.append)
             task.signals.finished.connect(self._on_task_finished)

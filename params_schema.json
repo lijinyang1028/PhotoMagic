@@ -1,25 +1,1505 @@
 {
-  "exposure":        {"section": "Exposure",             "key": "Compensation",   "type": "float", "min": -3.0,  "max": 3.0,  "enable": false},
-  "brightness":      {"section": "Exposure",             "key": "Brightness",     "type": "int",   "min": -100,  "max": 100,   "enable": false},
-  "contrast":        {"section": "Exposure",             "key": "Contrast",       "type": "int",   "min": -100,  "max": 100,   "enable": false},
-  "saturation":      {"section": "Exposure",             "key": "Saturation",     "type": "int",   "min": -100,  "max": 100,   "enable": false},
-  "black":           {"section": "Exposure",             "key": "Black",          "type": "int",   "min": -16384,"max": 32768, "enable": false},
-  "highlight_compr": {"section": "Exposure",             "key": "HighlightCompr", "type": "int",   "min": 0,     "max": 500,   "enable": false},
-  "shadow_compr":    {"section": "Exposure",             "key": "ShadowCompr",    "type": "int",   "min": 0,     "max": 100,   "enable": false},
-  "highlights":      {"section": "Shadows & Highlights", "key": "Highlights",     "type": "int",   "min": 0,     "max": 100,   "enable": true},
-  "highlight_width": {"section": "Shadows & Highlights", "key": "HighlightTonalWidth", "type": "int", "min": 10, "max": 100, "enable": true},
-  "shadows":         {"section": "Shadows & Highlights", "key": "Shadows",        "type": "int",   "min": 0,     "max": 100,   "enable": true},
-  "shadow_width":    {"section": "Shadows & Highlights", "key": "ShadowTonalWidth",  "type": "int", "min": 10,  "max": 100,   "enable": true},
-  "temperature":     {"section": "White Balance",        "key": "Temperature",    "type": "int",   "min": 1500,  "max": 60000, "enable": false},
-  "tint":            {"section": "White Balance",        "key": "Green",          "type": "float", "min": 0.5,   "max": 2.0,   "enable": false},
-  "sharpen_amount":  {"section": "Sharpening",           "key": "DeconvAmount",   "type": "int",   "min": 0,     "max": 200,   "enable": true},
-  "sharpen_radius":  {"section": "Sharpening",           "key": "Radius",         "type": "float", "min": 0.3,   "max": 3.0,   "enable": true},
-  "sharpen_threshold": {"section": "Sharpening",         "key": "Threshold",      "type": "int",   "min": 0,     "max": 100,   "enable": true},
-  "vibrance":        {"section": "Vibrance",             "key": "Saturated",      "type": "int",   "min": 0,     "max": 100,   "enable": true},
-  "vibrance_pastels": {"section": "Vibrance",            "key": "Pastels",        "type": "int",   "min": -100,  "max": 100,   "enable": true},
-  "distortion":      {"section": "Distortion",           "key": "Amount",         "type": "float", "min": -1.0,  "max": 1.0,   "enable": false},
-  "luma_denoise":    {"section": "Directional Pyramid Denoising", "key": "Luma",   "type": "int",   "min": 0,     "max": 100,   "enable": true},
-  "luma_detail":     {"section": "Directional Pyramid Denoising", "key": "Ldetail","type": "int",   "min": 0,     "max": 100,   "enable": true},
-  "chroma_denoise":  {"section": "Directional Pyramid Denoising", "key": "Chroma", "type": "int",   "min": 0,     "max": 100,   "enable": true},
-  "epd_strength":    {"section": "EPD",                  "key": "Strength",       "type": "float", "min": -1.0,  "max": 2.0,   "enable": true}
+  "exposure": {
+    "section": "Exposure",
+    "key": "Compensation",
+    "type": "float",
+    "min": -3.0,
+    "max": 3.0,
+    "enable": false,
+    "desc": "曝光补偿(EV)，正值提亮、负值压暗"
+  },
+  "contrast": {
+    "section": "Exposure",
+    "key": "Contrast",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": false,
+    "desc": "对比度，正值加强明暗反差"
+  },
+  "saturation": {
+    "section": "Exposure",
+    "key": "Saturation",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": false,
+    "desc": "整体饱和度"
+  },
+  "highlight_compr": {
+    "section": "Exposure",
+    "key": "HighlightCompr",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": false,
+    "desc": "高光压缩，压低过曝区域"
+  },
+  "shadow_compr": {
+    "section": "Exposure",
+    "key": "ShadowCompr",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": false,
+    "desc": "阴影压缩，抬高暗部"
+  },
+  "highlights": {
+    "section": "Shadows & Highlights",
+    "key": "Highlights",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "高光恢复强度"
+  },
+  "shadows": {
+    "section": "Shadows & Highlights",
+    "key": "Shadows",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "阴影提亮强度"
+  },
+  "temperature": {
+    "section": "White Balance",
+    "key": "Temperature",
+    "type": "int",
+    "min": 2000,
+    "max": 12000,
+    "enable": false,
+    "desc": "色温(K)，低偏冷、高偏暖"
+  },
+  "tint": {
+    "section": "White Balance",
+    "key": "Green",
+    "type": "float",
+    "min": 0.5,
+    "max": 2.0,
+    "enable": false,
+    "desc": "绿/品红倾向，1.0 为中性"
+  },
+  "sharpen_amount": {
+    "section": "Sharpening",
+    "key": "DeconvAmount",
+    "type": "int",
+    "min": 0,
+    "max": 200,
+    "enable": true,
+    "desc": "反卷积锐化强度，提升细节但会放大噪点"
+  },
+  "vibrance": {
+    "section": "Vibrance",
+    "key": "Saturated",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "自然饱和度，比饱和度更保护肤色"
+  },
+  "distortion": {
+    "section": "Distortion",
+    "key": "Amount",
+    "type": "float",
+    "min": -1.0,
+    "max": 1.0,
+    "enable": false,
+    "desc": "镜头畸变校正"
+  },
+  "sh_tonal_width_shadows": {
+    "section": "Shadows & Highlights",
+    "key": "TonalWidthShadows",
+    "type": "int",
+    "min": 10,
+    "max": 100,
+    "enable": true,
+    "desc": "阴影色调宽度，控制阴影影响范围"
+  },
+  "sh_tonal_width_highlights": {
+    "section": "Shadows & Highlights",
+    "key": "TonalWidthHighlights",
+    "type": "int",
+    "min": 10,
+    "max": 100,
+    "enable": true,
+    "desc": "高光色调宽度，控制高光影响范围"
+  },
+  "sh_radius": {
+    "section": "Shadows & Highlights",
+    "key": "Radius",
+    "type": "int",
+    "min": 10,
+    "max": 200,
+    "enable": true,
+    "desc": "阴影/高光作用半径，越大过渡越平滑"
+  },
+  "sh_local_contrast": {
+    "section": "Shadows & Highlights",
+    "key": "LocalContrast",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": true,
+    "desc": "局部对比度，增强或减弱局部明暗反差"
+  },
+  "sh_hltonal_width": {
+    "section": "Shadows & Highlights",
+    "key": "HLTonalWidth",
+    "type": "int",
+    "min": 10,
+    "max": 100,
+    "enable": true,
+    "desc": "高光色调宽度，控制高光恢复范围"
+  },
+  "sh_shtonal_width": {
+    "section": "Shadows & Highlights",
+    "key": "SHTonalWidth",
+    "type": "int",
+    "min": 10,
+    "max": 100,
+    "enable": true,
+    "desc": "阴影色调宽度，控制阴影提亮范围"
+  },
+  "sh_radius_sh": {
+    "section": "Shadows & Highlights",
+    "key": "RadiusSH",
+    "type": "int",
+    "min": 10,
+    "max": 200,
+    "enable": true,
+    "desc": "阴影/高光模糊半径，影响过渡平滑度"
+  },
+  "sh_hlcompr": {
+    "section": "Shadows & Highlights",
+    "key": "HLCompr",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "高光压缩程度，恢复过曝区域细节"
+  },
+  "sh_shcompr": {
+    "section": "Shadows & Highlights",
+    "key": "SHCompr",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "阴影压缩程度，抑制暗部噪声"
+  },
+  "sh_hlcomprthresh": {
+    "section": "Shadows & Highlights",
+    "key": "HLComprThresh",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "高光压缩阈值，控制压缩起始亮度"
+  },
+  "sharpening_radius": {
+    "section": "Sharpening",
+    "key": "Radius",
+    "type": "float",
+    "min": 0.2,
+    "max": 3.0,
+    "enable": true,
+    "desc": "USM锐化半径，越小细节越精细"
+  },
+  "sharpening_threshold": {
+    "section": "Sharpening",
+    "key": "Threshold",
+    "type": "int",
+    "min": 0,
+    "max": 200,
+    "enable": true,
+    "desc": "锐化阈值，越高越避免放大噪点"
+  },
+  "sharpening_deconv_radius": {
+    "section": "Sharpening",
+    "key": "DeconvRadius",
+    "type": "float",
+    "min": 0.2,
+    "max": 3.0,
+    "enable": true,
+    "desc": "反卷积半径，匹配镜头模糊半径"
+  },
+  "sharpening_deconv_radius_offset": {
+    "section": "Sharpening",
+    "key": "DeconvRadiusOffset",
+    "type": "float",
+    "min": -1.0,
+    "max": 2.0,
+    "enable": true,
+    "desc": "反卷积半径偏移，自动调整锐化尺度"
+  },
+  "sharpening_deconv_iterations": {
+    "section": "Sharpening",
+    "key": "DeconvIterations",
+    "type": "int",
+    "min": 1,
+    "max": 100,
+    "enable": true,
+    "desc": "反卷积迭代次数，越多越锐但可能产生伪影"
+  },
+  "sharpening_deconv_damping": {
+    "section": "Sharpening",
+    "key": "DeconvDamping",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "反卷积阻尼，抑制锐化伪影"
+  },
+  "sharpening_deconv_apply_to": {
+    "section": "Sharpening",
+    "key": "DeconvApplyTo",
+    "type": "int",
+    "min": 0,
+    "max": 2,
+    "enable": true,
+    "desc": "反卷积应用范围：0亮度 1亮度+色度 2仅色度"
+  },
+  "sharpening_edges_only": {
+    "section": "Sharpening",
+    "key": "OnlyEdges",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "仅锐化边缘区域，保护平滑区域"
+  },
+  "sharpening_edge_radius": {
+    "section": "Sharpening",
+    "key": "EdgeRadius",
+    "type": "float",
+    "min": 0.5,
+    "max": 5.0,
+    "enable": true,
+    "desc": "边缘检测半径，控制边缘识别范围"
+  },
+  "sharpening_edge_tolerance": {
+    "section": "Sharpening",
+    "key": "EdgeTolerance",
+    "type": "int",
+    "min": 0,
+    "max": 1000,
+    "enable": true,
+    "desc": "边缘检测容差，越低越只锐化强边缘"
+  },
+  "sharpening_halo_control": {
+    "section": "Sharpening",
+    "key": "HaloControl",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用光晕控制，抑制锐化产生的光晕"
+  },
+  "sharpening_halo_control_amount": {
+    "section": "Sharpening",
+    "key": "HaloControlAmount",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "光晕控制强度，越高光晕抑制越强"
+  },
+  "sharpen_micro_contrast": {
+    "section": "SharpenMicro",
+    "key": "Amount",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "微观对比度锐化强度，增强纹理质感"
+  },
+  "sharpen_micro_uniformity": {
+    "section": "SharpenMicro",
+    "key": "Uniformity",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "微观锐化均匀度，控制纹理增强的均衡性"
+  },
+  "sharpen_edge_strength": {
+    "section": "SharpenEdge",
+    "key": "Strength",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "边缘锐化强度，仅作用于边缘区域"
+  },
+  "sharpen_edge_passes": {
+    "section": "SharpenEdge",
+    "key": "Passes",
+    "type": "int",
+    "min": 1,
+    "max": 4,
+    "enable": true,
+    "desc": "边缘锐化迭代次数，越多边缘越锐"
+  },
+  "sharpen_edge_three_channels": {
+    "section": "SharpenEdge",
+    "key": "ThreeChannels",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "三通道独立锐化，分别处理RGB边缘"
+  },
+  "dirpyr_denoise_luma": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Luma",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "亮度降噪强度，抑制明度噪声"
+  },
+  "dirpyr_denoise_luma_detail": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Ldetail",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "亮度细节保留，越高保留越多纹理"
+  },
+  "dirpyr_denoise_chroma": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Chroma",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "色度降噪强度，抑制彩色噪点"
+  },
+  "dirpyr_denoise_chroma_detail": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Cdetail",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "色度细节保留，越高彩色过渡越自然"
+  },
+  "dirpyr_denoise_gamma": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Gamma",
+    "type": "float",
+    "min": 1.0,
+    "max": 3.0,
+    "enable": true,
+    "desc": "降噪伽马，低值保留细节高值增强降噪"
+  },
+  "dirpyr_denoise_method": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Method",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "降噪方法：Lab 或 RGB"
+  },
+  "dirpyr_denoise_method_med": {
+    "section": "Directional Pyramid Denoising",
+    "key": "MethodMed",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "中值滤波模式：None、Lonly、Aonly、LpA"
+  },
+  "dirpyr_denoise_median": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Median",
+    "type": "int",
+    "min": 0,
+    "max": 7,
+    "enable": true,
+    "desc": "中值滤波迭代次数，去除椒盐噪声"
+  },
+  "dirpyr_denoise_median_method": {
+    "section": "Directional Pyramid Denoising",
+    "key": "MedianMethod",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "中值滤波方法：3x3 或 5x5"
+  },
+  "dirpyr_denoise_rgbmethod": {
+    "section": "Directional Pyramid Denoising",
+    "key": "RGBMethod",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "RGB降噪方法：Standard 或 Lab"
+  },
+  "dirpyr_denoise_enhance": {
+    "section": "Directional Pyramid Denoising",
+    "key": "Enhance",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用降噪后细节增强"
+  },
+  "dirpyr_denoise_enhance_amount": {
+    "section": "Directional Pyramid Denoising",
+    "key": "EnhanceAmount",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "细节增强强度，恢复降噪后的纹理"
+  },
+  "dirpyr_denoise_lcurve": {
+    "section": "Directional Pyramid Denoising",
+    "key": "LCurve",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "亮度降噪曲线，按亮度调整降噪强度"
+  },
+  "dirpyr_denoise_ccurve": {
+    "section": "Directional Pyramid Denoising",
+    "key": "CCurve",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "色度降噪曲线，按色度调整降噪强度"
+  },
+  "dirpyr_denoise_autochroma": {
+    "section": "Directional Pyramid Denoising",
+    "key": "AutoChroma",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "自动色度降噪，根据ISO自动调整"
+  },
+  "dirpyr_denoise_autochroma_amount": {
+    "section": "Directional Pyramid Denoising",
+    "key": "AutoChromaAmount",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": true,
+    "desc": "自动色度降噪强度调整"
+  },
+  "dirpyr_denoise_autochroma_curve": {
+    "section": "Directional Pyramid Denoising",
+    "key": "AutoChromaCurve",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "自动色度降噪曲线"
+  },
+  "dirpyr_denoise_skinprotect": {
+    "section": "Directional Pyramid Denoising",
+    "key": "SkinProtect",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "肤色保护，避免肤色被过度降噪"
+  },
+  "dirpyr_denoise_skinprotect_amount": {
+    "section": "Directional Pyramid Denoising",
+    "key": "SkinProtectAmount",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "肤色保护强度"
+  },
+  "impulse_denoise_enabled": {
+    "section": "Impulse Denoising",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用脉冲降噪，去除椒盐噪声"
+  },
+  "impulse_denoise_threshold": {
+    "section": "Impulse Denoising",
+    "key": "Threshold",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "脉冲降噪阈值，越低去除越多"
+  },
+  "impulse_denoise_median": {
+    "section": "Impulse Denoising",
+    "key": "Median",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "使用中值滤波代替脉冲检测"
+  },
+  "tonecurve_enabled": {
+    "section": "Tone Curve",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用色调曲线"
+  },
+  "tonecurve_curve": {
+    "section": "Tone Curve",
+    "key": "Curve",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "主色调曲线控制点，格式为 x;y; 序列"
+  },
+  "tonecurve_curve2": {
+    "section": "Tone Curve",
+    "key": "Curve2",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "第二条曲线控制点，用于特定模式"
+  },
+  "tonecurve_curvemode": {
+    "section": "Tone Curve",
+    "key": "CurveMode",
+    "type": "int",
+    "min": 0,
+    "max": 5,
+    "enable": true,
+    "desc": "曲线模式：0标准 1加权 2胶片 3饱和度混合 4亮度 5感知"
+  },
+  "tonecurve_curvemode2": {
+    "section": "Tone Curve",
+    "key": "CurveMode2",
+    "type": "int",
+    "min": 0,
+    "max": 5,
+    "enable": true,
+    "desc": "曲线2模式，含义同 CurveMode"
+  },
+  "tonecurve_fromhistogram": {
+    "section": "Tone Curve",
+    "key": "CurveFromHistogramMatching",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "从直方图匹配自动生成曲线"
+  },
+  "tonecurve_automatic": {
+    "section": "Tone Curve",
+    "key": "Automatic",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "自动匹配相机色调曲线"
+  },
+  "tonecurve_clip": {
+    "section": "Tone Curve",
+    "key": "Clip",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "曲线裁剪值，控制暗部截断"
+  },
+  "tonecurve_expcomp": {
+    "section": "Tone Curve",
+    "key": "ExposureComp",
+    "type": "float",
+    "min": -2.0,
+    "max": 2.0,
+    "enable": true,
+    "desc": "色调曲线曝光补偿"
+  },
+  "tonecurve_shcompr": {
+    "section": "Tone Curve",
+    "key": "SHComp",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "阴影压缩量"
+  },
+  "tonecurve_hlcompr": {
+    "section": "Tone Curve",
+    "key": "HLComp",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "高光压缩量"
+  },
+  "vibrance_pastels": {
+    "section": "Vibrance",
+    "key": "Pastels",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": true,
+    "desc": "柔色调自然饱和度，保护低饱和色彩"
+  },
+  "vibrance_psthreshold": {
+    "section": "Vibrance",
+    "key": "PSTreshold",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "柔色/饱和色阈值，划分两种色调范围"
+  },
+  "vibrance_protectskins": {
+    "section": "Vibrance",
+    "key": "ProtectSkins",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用肤色保护，避免肤色被过度加饱和"
+  },
+  "vibrance_avoidcolorshift": {
+    "section": "Vibrance",
+    "key": "AvoidColorShift",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "避免色相偏移，保持颜色准确"
+  },
+  "vibrance_pastsattog": {
+    "section": "Vibrance",
+    "key": "PastSatTog",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "联动柔色与饱和色滑块"
+  },
+  "vibrance_skintonescurve": {
+    "section": "Vibrance",
+    "key": "SkinTonesCurve",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "肤色色相调整曲线 H=f(H)"
+  },
+  "localcontrast_enabled": {
+    "section": "Local Contrast",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用局部对比度"
+  },
+  "localcontrast_radius": {
+    "section": "Local Contrast",
+    "key": "Radius",
+    "type": "int",
+    "min": 10,
+    "max": 500,
+    "enable": true,
+    "desc": "局部对比度半径，越大效果越平滑"
+  },
+  "localcontrast_amount": {
+    "section": "Local Contrast",
+    "key": "Amount",
+    "type": "float",
+    "min": 0.0,
+    "max": 2.0,
+    "enable": true,
+    "desc": "局部对比度强度"
+  },
+  "localcontrast_darkness": {
+    "section": "Local Contrast",
+    "key": "Darkness",
+    "type": "float",
+    "min": 0.0,
+    "max": 2.0,
+    "enable": true,
+    "desc": "暗部增强程度，0为不加深"
+  },
+  "localcontrast_lightness": {
+    "section": "Local Contrast",
+    "key": "Lightness",
+    "type": "float",
+    "min": 0.0,
+    "max": 2.0,
+    "enable": true,
+    "desc": "亮部增强程度，0为不提亮"
+  },
+  "epd_enabled": {
+    "section": "EPD",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用边缘保护细节"
+  },
+  "epd_strength": {
+    "section": "EPD",
+    "key": "Strength",
+    "type": "float",
+    "min": -1.0,
+    "max": 2.0,
+    "enable": true,
+    "desc": "边缘保护细节强度，正值增强负值减弱"
+  },
+  "epd_gamma": {
+    "section": "EPD",
+    "key": "Gamma",
+    "type": "float",
+    "min": 0.8,
+    "max": 1.5,
+    "enable": true,
+    "desc": "EPD伽马，控制细节增强的亮度分布"
+  },
+  "prsharpening_enabled": {
+    "section": "PostResizeSharpening",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用输出锐化，在缩放后应用"
+  },
+  "prsharpening_method": {
+    "section": "PostResizeSharpening",
+    "key": "Method",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "输出锐化方法：USM 或 RL Deconvolution"
+  },
+  "prsharpening_radius": {
+    "section": "PostResizeSharpening",
+    "key": "Radius",
+    "type": "float",
+    "min": 0.2,
+    "max": 3.0,
+    "enable": true,
+    "desc": "输出锐化半径"
+  },
+  "prsharpening_amount": {
+    "section": "PostResizeSharpening",
+    "key": "Amount",
+    "type": "int",
+    "min": 0,
+    "max": 500,
+    "enable": true,
+    "desc": "输出锐化强度"
+  },
+  "prsharpening_threshold": {
+    "section": "PostResizeSharpening",
+    "key": "Threshold",
+    "type": "int",
+    "min": 0,
+    "max": 200,
+    "enable": true,
+    "desc": "输出锐化阈值"
+  },
+  "prsharpening_edgesonly": {
+    "section": "PostResizeSharpening",
+    "key": "OnlyEdges",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "输出锐化仅作用于边缘"
+  },
+  "prsharpening_deconviterations": {
+    "section": "PostResizeSharpening",
+    "key": "DeconvIterations",
+    "type": "int",
+    "min": 1,
+    "max": 50,
+    "enable": true,
+    "desc": "输出反卷积迭代次数"
+  },
+  "prsharpening_deconvdamping": {
+    "section": "PostResizeSharpening",
+    "key": "DeconvDamping",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "输出反卷积阻尼"
+  },
+  "cacorrection_enabled": {
+    "section": "Chromatic Aberration Correction",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用色差校正"
+  },
+  "cacorrection_autocorrect": {
+    "section": "Chromatic Aberration Correction",
+    "key": "AutoCorrect",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "自动检测并校正色差"
+  },
+  "cacorrection_red": {
+    "section": "Chromatic Aberration Correction",
+    "key": "Red",
+    "type": "float",
+    "min": -5.0,
+    "max": 5.0,
+    "enable": true,
+    "desc": "红色通道色差校正量"
+  },
+  "cacorrection_blue": {
+    "section": "Chromatic Aberration Correction",
+    "key": "Blue",
+    "type": "float",
+    "min": -5.0,
+    "max": 5.0,
+    "enable": true,
+    "desc": "蓝色通道色差校正量"
+  },
+  "cacorrection_iterations": {
+    "section": "Chromatic Aberration Correction",
+    "key": "Iterations",
+    "type": "int",
+    "min": 1,
+    "max": 5,
+    "enable": true,
+    "desc": "自动色差校正迭代次数"
+  },
+  "vignetting_enabled": {
+    "section": "Vignetting Correction",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用暗角校正"
+  },
+  "vignetting_amount": {
+    "section": "Vignetting Correction",
+    "key": "Amount",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角校正量，正值提亮四角"
+  },
+  "vignetting_radius": {
+    "section": "Vignetting Correction",
+    "key": "Radius",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角校正作用半径"
+  },
+  "vignetting_strength": {
+    "section": "Vignetting Correction",
+    "key": "Strength",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角校正强度"
+  },
+  "vignetting_center_x": {
+    "section": "Vignetting Correction",
+    "key": "CenterX",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角校正中心X偏移"
+  },
+  "vignetting_center_y": {
+    "section": "Vignetting Correction",
+    "key": "CenterY",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角校正中心Y偏移"
+  },
+  "pcvignette_enabled": {
+    "section": "Vignetting Filter",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用艺术暗角滤镜"
+  },
+  "pcvignette_strength": {
+    "section": "Vignetting Filter",
+    "key": "Strength",
+    "type": "float",
+    "min": -3.0,
+    "max": 3.0,
+    "enable": true,
+    "desc": "暗角强度，正为压暗负为提亮四角"
+  },
+  "pcvignette_feather": {
+    "section": "Vignetting Filter",
+    "key": "Feather",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角羽化程度"
+  },
+  "pcvignette_roundness": {
+    "section": "Vignetting Filter",
+    "key": "Roundness",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角形状圆度：0矩形 50椭圆 100圆形"
+  },
+  "colorappearance_enabled": {
+    "section": "Color appearance",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用色彩外观模型，模拟人眼感知"
+  },
+  "colorappearance_model": {
+    "section": "Color appearance",
+    "key": "Model",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "色彩外观模型：CIECAM02 或 CIECAM16"
+  },
+  "colorappearance_surround": {
+    "section": "Color appearance",
+    "key": "Surround",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "观看环境：Average、Dim 或 Dark"
+  },
+  "colorappearance_adapscen": {
+    "section": "Color appearance",
+    "key": "AdaptScene",
+    "type": "float",
+    "min": 0.1,
+    "max": 10.0,
+    "enable": true,
+    "desc": "场景适应亮度"
+  },
+  "colorappearance_adapscenout": {
+    "section": "Color appearance",
+    "key": "AdaptSceneOut",
+    "type": "float",
+    "min": 0.1,
+    "max": 10.0,
+    "enable": true,
+    "desc": "输出适应亮度"
+  },
+  "colorappearance_surrsrc": {
+    "section": "Color appearance",
+    "key": "SurroundSrc",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "源场景观看环境"
+  },
+  "colorappearance_surrdst": {
+    "section": "Color appearance",
+    "key": "SurroundDst",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "目标观看环境"
+  },
+  "colorappearance_gamut": {
+    "section": "Color appearance",
+    "key": "Gamut",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用色域压缩"
+  },
+  "colorappearance_tempout": {
+    "section": "Color appearance",
+    "key": "TempOut",
+    "type": "float",
+    "min": 2000,
+    "max": 12000,
+    "enable": true,
+    "desc": "输出色温"
+  },
+  "colorappearance_ybscen": {
+    "section": "Color appearance",
+    "key": "YbScene",
+    "type": "int",
+    "min": -100,
+    "max": 100,
+    "enable": true,
+    "desc": "场景黄蓝平衡"
+  },
+  "colorappearance_curve": {
+    "section": "Color appearance",
+    "key": "Curve",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "色彩外观亮度曲线"
+  },
+  "colorappearance_curve2": {
+    "section": "Color appearance",
+    "key": "Curve2",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "色彩外观第二条曲线"
+  },
+  "rotate_enabled": {
+    "section": "Rotate",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用旋转校正"
+  },
+  "rotate_degree": {
+    "section": "Rotate",
+    "key": "Degree",
+    "type": "float",
+    "min": -45.0,
+    "max": 45.0,
+    "enable": true,
+    "desc": "旋转角度，正值顺时针"
+  },
+  "crop_enabled": {
+    "section": "Crop",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用裁剪"
+  },
+  "crop_x": {
+    "section": "Crop",
+    "key": "X",
+    "type": "int",
+    "min": 0,
+    "max": 10000,
+    "enable": true,
+    "desc": "裁剪区域左上角X坐标"
+  },
+  "crop_y": {
+    "section": "Crop",
+    "key": "Y",
+    "type": "int",
+    "min": 0,
+    "max": 10000,
+    "enable": true,
+    "desc": "裁剪区域左上角Y坐标"
+  },
+  "crop_w": {
+    "section": "Crop",
+    "key": "W",
+    "type": "int",
+    "min": 1,
+    "max": 10000,
+    "enable": true,
+    "desc": "裁剪区域宽度"
+  },
+  "crop_h": {
+    "section": "Crop",
+    "key": "H",
+    "type": "int",
+    "min": 1,
+    "max": 10000,
+    "enable": true,
+    "desc": "裁剪区域高度"
+  },
+  "resize_enabled": {
+    "section": "Resize",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用缩放"
+  },
+  "resize_scale": {
+    "section": "Resize",
+    "key": "Scale",
+    "type": "float",
+    "min": 0.01,
+    "max": 16.0,
+    "enable": true,
+    "desc": "缩放比例"
+  },
+  "resize_method": {
+    "section": "Resize",
+    "key": "Method",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "缩放算法：Nearest 或 Lanczos"
+  },
+  "resize_appliesto": {
+    "section": "Resize",
+    "key": "AppliesTo",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "缩放应用范围：裁剪区域或全图"
+  },
+  "raw_bayersensor_method": {
+    "section": "RAW",
+    "key": "BayerSensorMethod",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "拜耳传感器去马赛克方法"
+  },
+  "raw_bayersensor_ccsteps": {
+    "section": "RAW",
+    "key": "BayerSensorCCSteps",
+    "type": "int",
+    "min": 0,
+    "max": 5,
+    "enable": true,
+    "desc": "去马赛克伪影抑制步骤数"
+  },
+  "raw_xtranssensor_method": {
+    "section": "RAW",
+    "key": "XtransSensorMethod",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "X-Trans传感器去马赛克方法"
+  },
+  "raw_xtranssensor_ccsteps": {
+    "section": "RAW",
+    "key": "XtransSensorCCSteps",
+    "type": "int",
+    "min": 0,
+    "max": 5,
+    "enable": true,
+    "desc": "X-Trans去马赛克伪影抑制步骤数"
+  },
+  "raw_ca_autocorrect": {
+    "section": "RAW",
+    "key": "CAAutoCorrect",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "RAW级自动色差校正"
+  },
+  "raw_ca_red": {
+    "section": "RAW",
+    "key": "CARed",
+    "type": "float",
+    "min": -5.0,
+    "max": 5.0,
+    "enable": true,
+    "desc": "RAW级红色通道色差校正"
+  },
+  "raw_ca_blue": {
+    "section": "RAW",
+    "key": "CABlue",
+    "type": "float",
+    "min": -5.0,
+    "max": 5.0,
+    "enable": true,
+    "desc": "RAW级蓝色通道色差校正"
+  },
+  "raw_ca_iterations": {
+    "section": "RAW",
+    "key": "CAIterations",
+    "type": "int",
+    "min": 1,
+    "max": 5,
+    "enable": true,
+    "desc": "RAW级色差校正迭代次数"
+  },
+  "raw_line_denoise_direction": {
+    "section": "RAW",
+    "key": "LineDenoiseDirection",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "PDAF线降噪方向"
+  },
+  "raw_green_equil": {
+    "section": "RAW",
+    "key": "GreenEquil",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用绿色通道均衡"
+  },
+  "lensprofile_enabled": {
+    "section": "LensProfile",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用镜头配置文件校正"
+  },
+  "lensprofile_lcpfile": {
+    "section": "LensProfile",
+    "key": "LCPFile",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "LCP镜头配置文件路径"
+  },
+  "lensprofile_uselcp": {
+    "section": "LensProfile",
+    "key": "UseLCP",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "使用LCP文件中的校正参数"
+  },
+  "retinex_enabled": {
+    "section": "Retinex",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用Retinex动态范围增强"
+  },
+  "retinex_method": {
+    "section": "Retinex",
+    "key": "Method",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "Retinex算法：Low、High 或 Free"
+  },
+  "retinex_strength": {
+    "section": "Retinex",
+    "key": "Strength",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "Retinex强度"
+  },
+  "retinex_radius": {
+    "section": "Retinex",
+    "key": "Radius",
+    "type": "int",
+    "min": 0,
+    "max": 500,
+    "enable": true,
+    "desc": "Retinex作用半径"
+  },
+  "retinex_gammaretinex": {
+    "section": "Retinex",
+    "key": "GammaRetinex",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "Retinex伽马模式"
+  },
+  "retinex_scales": {
+    "section": "Retinex",
+    "key": "Scales",
+    "type": "int",
+    "min": 1,
+    "max": 8,
+    "enable": true,
+    "desc": "Retinex多尺度层数"
+  },
+  "retinex_variance": {
+    "section": "Retinex",
+    "key": "Variance",
+    "type": "int",
+    "min": 0,
+    "max": 500,
+    "enable": true,
+    "desc": "Retinex方差"
+  },
+  "retinex_hltonal": {
+    "section": "Retinex",
+    "key": "HLTonal",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "Retinex高光色调宽度"
+  },
+  "retinex_shtonal": {
+    "section": "Retinex",
+    "key": "SHTonal",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "Retinex阴影色调宽度"
+  },
+  "gradient_enabled": {
+    "section": "Gradient",
+    "key": "Enabled",
+    "type": "bool",
+    "min": 0,
+    "max": 1,
+    "enable": true,
+    "desc": "启用渐变滤镜"
+  },
+  "gradient_degree": {
+    "section": "Gradient",
+    "key": "Degree",
+    "type": "float",
+    "min": 0.0,
+    "max": 360.0,
+    "enable": true,
+    "desc": "渐变角度"
+  },
+  "gradient_feather": {
+    "section": "Gradient",
+    "key": "Feather",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "渐变羽化程度"
+  },
+  "gradient_strength": {
+    "section": "Gradient",
+    "key": "Strength",
+    "type": "float",
+    "min": -5.0,
+    "max": 5.0,
+    "enable": true,
+    "desc": "渐变强度"
+  },
+  "gradient_center_x": {
+    "section": "Gradient",
+    "key": "CenterX",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "渐变中心X位置"
+  },
+  "gradient_center_y": {
+    "section": "Gradient",
+    "key": "CenterY",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "渐变中心Y位置"
+  },
+  "gradient_type": {
+    "section": "Gradient",
+    "key": "Type",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "渐变类型：线性或径向"
+  },
+  "pcvignette_radius": {
+    "section": "Vignetting Filter",
+    "key": "Radius",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "暗角滤镜作用半径"
+  },
+  "sharpening_contrast": {
+    "section": "Sharpening",
+    "key": "Contrast",
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "enable": true,
+    "desc": "锐化对比度阈值"
+  },
+  "sharpening_blurradius": {
+    "section": "Sharpening",
+    "key": "BlurRadius",
+    "type": "float",
+    "min": 0.2,
+    "max": 5.0,
+    "enable": true,
+    "desc": "锐化模糊半径"
+  },
+  "dirpyr_denoise_smethod": {
+    "section": "Directional Pyramid Denoising",
+    "key": "SMethod",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "降噪平滑方法"
+  },
+  "dirpyr_denoise_lmethod": {
+    "section": "Directional Pyramid Denoising",
+    "key": "LMethod",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "亮度降噪方法"
+  },
+  "dirpyr_denoise_cmethod": {
+    "section": "Directional Pyramid Denoising",
+    "key": "CMethod",
+    "type": "string",
+    "min": 0,
+    "max": 0,
+    "enable": true,
+    "desc": "色度降噪方法"
+  }
 }

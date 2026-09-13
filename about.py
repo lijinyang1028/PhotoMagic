@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt, QUrl, QRect
 REPO_URL = "https://github.com/lijinyang1028/photomagic.git"
 DEEPSEEK_URL = "https://platform.deepseek.com/sign_in"
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 CONTRIBUTORS = [
     {
