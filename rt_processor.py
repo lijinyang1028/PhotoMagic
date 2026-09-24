@@ -56,13 +56,19 @@ def describe_params_for_prompt() -> str:
     lines = []
     for name, spec in schema.items():
         desc = spec.get("desc", name)
-        lo = spec["min"]
-        hi = spec["max"]
-        if spec["type"] == "float":
-            lo_s, hi_s = f"{lo:g}", f"{hi:g}"
+        typ = spec.get("type", "int")
+        if typ == "string":
+            lines.append(f'- "{name}": {desc}（字符串，见描述中的可选值）')
+        elif typ == "bool":
+            lines.append(f'- "{name}": {desc}（布尔：true 或 false）')
         else:
-            lo_s, hi_s = str(int(lo)), str(int(hi))
-        lines.append(f'- "{name}": {desc}，{lo_s} 到 {hi_s}')
+            lo = spec["min"]
+            hi = spec["max"]
+            if typ == "float":
+                lo_s, hi_s = f"{lo:g}", f"{hi:g}"
+            else:
+                lo_s, hi_s = str(int(lo)), str(int(hi))
+            lines.append(f'- "{name}": {desc}，{lo_s} 到 {hi_s}')
     return "\n".join(lines)
 
 
@@ -72,7 +78,7 @@ def validate_custom_params(data: dict) -> tuple:
     校验外部导入的参数定义。
     返回 (合法参数表, 错误信息列表)。错误不影响合法部分的导入。
     """
-    required = {"section", "key", "type", "min", "max"}
+    required = {"section", "key", "type"}
     valid = {}
     errors = []
 
@@ -87,17 +93,26 @@ def validate_custom_params(data: dict) -> tuple:
         if missing:
             errors.append(f"{name}: 缺少字段 {', '.join(sorted(missing))}")
             continue
-        if raw["type"] not in ("int", "float"):
-            errors.append(f"{name}: type 只能是 int 或 float")
-            continue
-        try:
-            float(raw["min"])
-            float(raw["max"])
-        except (TypeError, ValueError):
-            errors.append(f"{name}: min/max 必须是数值")
+        typ = raw["type"]
+        if typ not in ("int", "float", "string", "bool"):
+            errors.append(f"{name}: type 只能是 int / float / string / bool")
             continue
 
         spec = dict(raw)
+        if typ in ("int", "float"):
+            if "min" not in spec or "max" not in spec:
+                errors.append(f"{name}: 数值类型必须提供 min/max")
+                continue
+            try:
+                float(spec["min"])
+                float(spec["max"])
+            except (TypeError, ValueError):
+                errors.append(f"{name}: min/max 必须是数值")
+                continue
+        else:
+            spec.setdefault("min", 0)
+            spec.setdefault("max", 0)
+
         spec.setdefault("enable", False)
         spec.setdefault("desc", name)
         valid[name] = spec
@@ -161,10 +176,21 @@ SECTION_DEFAULTS = {
 }
 
 
+def _coerce_bool_to_rt(value) -> str:
+    """把各种输入转成 RawTherapee 期望的 'true' / 'false' 字符串。"""
+    if isinstance(value, str):
+        v = value.strip().lower()
+        is_true = v in ("true", "1", "yes", "on")
+    else:
+        is_true = bool(value)
+    return "true" if is_true else "false"
+
+
 def generate_pp3(params: dict, output_path: str, output_profile: str = "RT_sRGB"):
     """
     根据参数字典生成 RawTherapee 的 .pp3 配置文件。
     只识别参数表中定义的键，其余忽略；数值会钳位到合法范围。
+    string / bool 类型分别按字符串直写 / true|false 处理。
     """
     schema = _load_params()
     sections = {}
@@ -176,12 +202,23 @@ def generate_pp3(params: dict, output_path: str, output_profile: str = "RT_sRGB"
             continue
         section = spec["section"]
         key = spec["key"]
-        typ = float if spec["type"] == "float" else int
-        lo, hi = spec["min"], spec["max"]
-        try:
-            value = typ(max(lo, min(hi, value)))
-        except (TypeError, ValueError):
-            continue
+        typ = spec.get("type", "int")
+
+        if typ == "string":
+            # 字符串参数（如 "Lab" / 曲线控制点 "0;0;1;1;"）直接写入
+            value = str(value)
+        elif typ == "bool":
+            # RawTherapee 的 pp3 使用 true / false
+            value = _coerce_bool_to_rt(value)
+        else:
+            lo = spec["min"]
+            hi = spec["max"]
+            conv = float if typ == "float" else int
+            try:
+                value = conv(max(lo, min(hi, value)))
+            except (TypeError, ValueError):
+                continue
+
         sections.setdefault(section, []).append((key, value))
         if spec.get("enable", False):
             enabled.add(section)

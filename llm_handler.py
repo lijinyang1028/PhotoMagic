@@ -19,8 +19,9 @@ def load_image_base64_from_raw(raw_path: str, thumb_size: tuple = (512, 512)) ->
             # 尝试提取内嵌缩略图
             thumb = raw.extract_thumb()
             if thumb.format == rawpy.ThumbFormat.JPEG:
-                # 缩略图已经是 JPEG，可直接使用
-                return base64.b64encode(thumb.data).decode("utf-8")
+                # 内嵌缩略图是 JPEG，用 Pillow 解码后再统一缩放（不做缩放会
+                # 把相机内嵌的大尺寸预览原样发给 LLM，浪费 token 且易超时）
+                img = Image.open(BytesIO(thumb.data))
             else:
                 # 其他格式需转换为 RGB 再编码
                 rgb = raw.postprocess(use_camera_wb=True, half_size=True)
@@ -28,6 +29,10 @@ def load_image_base64_from_raw(raw_path: str, thumb_size: tuple = (512, 512)) ->
     except Exception:
         # 如果 rawpy 无法处理，尝试用 Pillow 直接打开（可能是普通图片）
         img = Image.open(raw_path)
+
+    # 统一转 RGB（P 模式 / 灰度 / CMYK 等都要转，否则 JPEG 保存会报错）
+    if img.mode != "RGB":
+        img = img.convert("RGB")
 
     # 统一缩放并转为 JPEG base64
     img.thumbnail(thumb_size, Image.Resampling.LANCZOS)

@@ -9,10 +9,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
     QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QMessageBox,
     QGroupBox, QFormLayout, QProgressBar, QStyledItemDelegate, QStyle,
-    QComboBox, QSpinBox
+    QComboBox, QSpinBox, QScrollArea, QFrame
 )
 
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QFont
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
 from PyQt6.QtCore import (
     Qt, QThreadPool, QRunnable, QObject, pyqtSignal, QSize, QRect, QPoint
 )
@@ -71,8 +71,13 @@ CS_MAP = {0: "RT_sRGB", 1: "RT_Medium_GSH_2.4", 2: "RT_Large_gsRGB"}
 
 # ----------------------------- 后台任务 -----------------------------
 class ImageLoadTask(QRunnable):
+    """
+    后台加载 RAW / 图片缩略图。
+    注意：Qt 规定 QPixmap 只能在 GUI 线程中使用，因此这里只产出 QImage，
+    由主线程在槽函数里转换为 QPixmap。
+    """
     class Signals(QObject):
-        loaded = pyqtSignal(str, QPixmap)
+        loaded = pyqtSignal(str, QImage)
         failed = pyqtSignal(str, str)
 
     def __init__(self, file_path, thumb_size):
@@ -84,9 +89,9 @@ class ImageLoadTask(QRunnable):
     def run(self):
         try:
             b64 = load_image_base64_from_raw(self.file_path, thumb_size=self.thumb_size)
-            pix = QPixmap()
-            if pix.loadFromData(base64.b64decode(b64), "JPEG"):
-                self.signals.loaded.emit(self.file_path, pix)
+            img = QImage()
+            if img.loadFromData(base64.b64decode(b64), "JPEG"):
+                self.signals.loaded.emit(self.file_path, img)
             else:
                 self.signals.failed.emit(self.file_path, "解码失败")
         except Exception as e:
@@ -530,7 +535,25 @@ class ProcessingWidget(QWidget):
 
     # ---------------- UI ----------------
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        # 页面级滚动区域：窗口高度不足时整个处理页可纵向滚动
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.page_scroll = QScrollArea()
+        self.page_scroll.setObjectName("pageScroll")
+        self.page_scroll.setWidgetResizable(True)
+        self.page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.page_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.page_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        outer.addWidget(self.page_scroll)
+
+        content = QWidget()
+        self.page_scroll.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
@@ -560,9 +583,22 @@ class ProcessingWidget(QWidget):
             self._scan_visible)
         list_preview_layout.addWidget(self.file_list_widget, 1)
 
+        # 预览视图放进滚动区域，随窗口弹性伸缩，必要时提供滚动条
+        self.preview_scroll = QScrollArea()
+        self.preview_scroll.setObjectName("previewScroll")
+        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.preview_scroll.setMinimumSize(320, 320)
+        self.preview_scroll.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        self.preview_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.preview_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
         self.preview_view = BeforeAfterView()
-        self.preview_view.setFixedSize(320, 320)
-        list_preview_layout.addWidget(self.preview_view)
+        self.preview_scroll.setWidget(self.preview_view)
+        list_preview_layout.addWidget(self.preview_scroll, 1)
 
         f_layout.addLayout(list_preview_layout)
         layout.addWidget(file_group)
@@ -795,9 +831,9 @@ class ProcessingWidget(QWidget):
             task.signals.failed.connect(self._on_thumb_failed)
             self.thumb_pool.start(task)
 
-    def _on_thumb_loaded(self, file_path, pixmap):
+    def _on_thumb_loaded(self, file_path, image):
         self._thumb_loading.discard(file_path)
-        self._thumb_cache[file_path] = pixmap
+        self._thumb_cache[file_path] = QPixmap.fromImage(image)
         self.file_list_widget.viewport().update()
 
     def _on_thumb_failed(self, file_path, err):
@@ -900,17 +936,17 @@ class ProcessingWidget(QWidget):
         task.signals.failed.connect(self._on_preview_failed)
         self.thumb_pool.start(task)
 
-    def _on_preview_original_loaded(self, file_path, pixmap):
+    def _on_preview_original_loaded(self, file_path, image):
         if file_path != self._preview_file:
             return
-        self.preview_view.set_original(pixmap)
+        self.preview_view.set_original(QPixmap.fromImage(image))
 
-    def _on_preview_processed_loaded(self, file_path, pixmap):
+    def _on_preview_processed_loaded(self, file_path, image):
         if self._preview_file is None:
             return
         if Path(file_path).stem != Path(self._preview_file).stem:
             return
-        self.preview_view.set_processed(pixmap)
+        self.preview_view.set_processed(QPixmap.fromImage(image))
 
     def _on_preview_failed(self, file_path, err):
         pass
