@@ -4,11 +4,11 @@ LLM 调用模块
 """
 import base64
 import json
-import re
 import requests
 from io import BytesIO
 from PIL import Image
 import rawpy
+
 
 def load_image_base64_from_raw(raw_path: str, thumb_size: tuple = (512, 512)) -> str:
     """
@@ -40,17 +40,64 @@ def load_image_base64_from_raw(raw_path: str, thumb_size: tuple = (512, 512)) ->
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
+
+def _extract_first_json_object(text: str):
+    """
+    从任意文本中提取第一个完整的 JSON 对象（字符串）。
+
+    使用括号计数而非贪婪正则 r"\\{.*\\}"，能正确处理：
+      - LLM 在 JSON 前后或之后输出额外文字 / 第二个 JSON 时，只取第一个对象
+      - JSON 字符串内部出现的 '{' 或 '}'
+      - 反斜杠转义（\\" 与 \\\\）
+
+    返回匹配到的子串；找不到匹配返回 None。
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 class LLMClient:
     """兼容 OpenAI 的 LLM 客户端"""
+
     def __init__(self, api_base: str, api_key: str, model: str):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.model = model
 
     def request_json(self, system_prompt: str, user_prompt: str,
-                     image_path: str, max_tokens=1024) -> dict:
+                     image_path: str, max_tokens=1024,
+                     stop_event=None) -> dict:
         """
-        将图片（RAW）编码后发送给视觉 LLM，期望返回一个 JSON 对象
+        将图片（RAW）编码后发送给视觉 LLM，期望返回一个 JSON 对象。
+
+        stop_event: 可选 threading.Event。
+                    设置后会在下一个网络数据块到达时中止本次请求
+                    （通常 1 秒内生效），抛出 InterruptedError。
         """
         base64_img = load_image_base64_from_raw(image_path)
 
@@ -82,23 +129,51 @@ class LLMClient:
             "temperature": 0.2
         }
 
-        resp = requests.post(f"{self.api_base}/chat/completions",
-                             headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+        # 用 stream=True 以便逐块读取，并在用户点停止时尽快中断。
+        # timeout=(connect, read)：连接 10s，块间读取 60s。
+        resp = requests.post(
+            f"{self.api_base}/chat/completions",
+            headers=headers, json=payload,
+            timeout=(10, 60), stream=True,
+        )
+
+        try:
+            chunks = []
+            for chunk in resp.iter_content(chunk_size=4096):
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("请求已被用户中止")
+                if chunk:
+                    chunks.append(chunk)
+            body = b"".join(chunks)
+        finally:
+            resp.close()
+
+        if resp.status_code >= 400:
+            err_text = body.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(
+                f"LLM 接口返回 {resp.status_code}: {err_text}"
+            )
+
+        if not body:
+            raise ValueError(
+                f"LLM 返回空响应 (status={resp.status_code})"
+            )
+
+        data = json.loads(body.decode("utf-8"))
         content = data["choices"][0]["message"]["content"].strip()
 
         # 模型可能把 JSON 包在 ```json ``` 里，或前后夹带其它文字
-        # 这个地方用正则来筛，LLM存在幻觉，网络传输也有风险，所以的话使用更加鲁棒的
-        # 正则解析
+        # 用括号计数的方式取第一个完整 JSON 对象（贪婪正则会在
+        # LLM 输出多个 JSON 或字符串里含 {} 时出错）
         if content.startswith("```"):
             content = content.split("```", 2)[1]
             if content.startswith("json"):
                 content = content[4:]
-        match = re.search(r"\{.*\}", content, re.DOTALL)  # 取第一个 { 到最后一个 }
-        if not match:
+
+        json_str = _extract_first_json_object(content)
+        if json_str is None:
             raise ValueError(f"LLM 返回内容不是有效 JSON:\n{content}")
         try:
-            return json.loads(match.group(0))
+            return json.loads(json_str)
         except json.JSONDecodeError:
             raise ValueError(f"LLM 返回内容不是有效 JSON:\n{content}")

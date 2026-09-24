@@ -10,11 +10,13 @@ from PyQt6.QtCore import Qt
 
 from processing import ProcessingWidget     #处理页
 from image_review import ImageReviewWidget     #图片评价
+from settings_page import SettingsPage    #设置页
 from rt_processor import check_rt_cli   #RT处理
 from about import AboutWidget    #关于页
+from settings import ensure_config_dir, migrate_legacy_files
 
 
-NAV_ITEMS = ["处理", "照片评价", "标签 2", "关于"]
+NAV_ITEMS = ["处理", "照片评价", "设置", "关于"]
 
 
 class MainWindow(QMainWindow):
@@ -79,11 +81,19 @@ class MainWindow(QMainWindow):
 
         self.processing_widget = ProcessingWidget()
         self.review_widget = ImageReviewWidget(self.processing_widget.get_llm_client)
+        self.settings_page = SettingsPage()
         self.about_widget = AboutWidget()
         self.stack.addWidget(self.processing_widget)
         self.stack.addWidget(self.review_widget)
-        self.stack.addWidget(QWidget())
+        self.stack.addWidget(self.settings_page)
         self.stack.addWidget(self.about_widget)
+
+        # 设置页保存后刷新处理页顶部的 API 状态
+        self.settings_page.api_config_changed.connect(
+            self.processing_widget.reload_api_config)
+        # 处理页「前往设置」按钮跳转到设置标签
+        self.processing_widget.open_settings_requested.connect(
+            lambda: self.sidebar.setCurrentRow(2))
 
     def apply_theme(self, scheme=None):
         if scheme is None:
@@ -167,6 +177,8 @@ class MainWindow(QMainWindow):
             #aboutSubtitle { color: #a0a0a0; }
             #aboutRole { color: #a0a0a0; font-size: 11px; }
             #aboutBio { color: #c0c0c0; font-size: 12px; }
+            #settingsSubtitle, #settingsHint { color: #a0a0a0; }
+            #settingsStatus, #keyringStatus, #apiStatus { color: #c0c0c0; }
             """
         else:
             qss = """
@@ -245,6 +257,8 @@ class MainWindow(QMainWindow):
             #aboutSubtitle { color: #666666; }
             #aboutRole { color: #888888; font-size: 11px; }
             #aboutBio { color: #444444; font-size: 12px; }
+            #settingsSubtitle, #settingsHint { color: #666666; }
+            #settingsStatus, #keyringStatus, #apiStatus { color: #444444; }
             """
         self.setStyleSheet(qss)
 
@@ -252,6 +266,8 @@ class MainWindow(QMainWindow):
             self.processing_widget.set_dark(is_dark)
         if hasattr(self, "review_widget"):
             self.review_widget.set_dark(is_dark)
+        if hasattr(self, "settings_page"):
+            self.settings_page.set_dark(is_dark)
         if hasattr(self, "about_widget"):
             self.about_widget.set_dark(is_dark)
 
@@ -276,6 +292,8 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    ensure_config_dir()
+    migrate_legacy_files()
     app = QApplication(sys.argv)
     app.setStyle("fusion")
     window = MainWindow()

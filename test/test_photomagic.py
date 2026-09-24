@@ -10,6 +10,8 @@ PhotoMagic 代码变更的单元测试（标准库 unittest，无额外依赖）
 
 运行： python -m unittest test_photomagic       （或 python -m unittest 自动发现）
 """
+
+import json
 import os
 import subprocess
 import tempfile
@@ -126,15 +128,36 @@ class TestCheckRtCli(unittest.TestCase):
 
 
 class _FakeResp:
-    """模拟 requests 的响应对象。"""
-    def __init__(self, content):
-        self._c = content
+    """
+    模拟 requests 的流式响应对象。
+
+    与旧版 mock 的区别：
+    - 增加了 status_code（request_json 会读它）
+    - 增加了 iter_content()（request_json 用 stream=True 逐块读取）
+    - 增加了 close()（request_json 在 finally 中调用）
+    - 内部把返回体预序列化成完整 JSON，再在 iter_content 中按 chunk_size 切片，
+      与真实 requests.Response 的行为一致
+    """
+    def __init__(self, content, status_code=200):
+        self._content = content
+        self.status_code = status_code
+        self._body = json.dumps({
+            "choices": [{"message": {"content": content}}]
+        }).encode("utf-8")
 
     def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size=4096):
+        for i in range(0, len(self._body), chunk_size):
+            yield self._body[i:i + chunk_size]
+
+    def close(self):
         pass
 
     def json(self):
-        return {"choices": [{"message": {"content": self._c}}]}
+        return json.loads(self._body.decode("utf-8"))
 
 
 def parse(content):

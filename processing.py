@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
     QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QMessageBox,
     QGroupBox, QFormLayout, QProgressBar, QStyledItemDelegate, QStyle,
-    QComboBox, QSpinBox, QScrollArea, QFrame
+    QComboBox, QSpinBox, QScrollArea, QFrame, QSlider
 )
 
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
@@ -25,14 +25,22 @@ from rt_processor import (
     load_custom_params, save_custom_params,
     autoload_custom_params, clear_custom_params,
 )
+from settings import load_settings, save_settings, get_api_key
 
 
 SYSTEM_PROMPT_HEADER = """你是一个专业的摄影后期处理顾问。请仔细观察我发给你的照片，结合拍摄参数和画面内容，给出最佳的 RawTherapee 后期参数建议。
 
+【美学约束 · 重要】
+1. 保持通透：优先保留原始对比度与层次感，避免画面发灰、发闷、发蒙。
+2. 慎用压缩类参数：ShadowCompr / HighlightCompr / Shadows / Highlights 容易压平动态范围，除非原片严重欠曝或过曝，否则建议保持在 30 以内。
+3. 联动补偿：如果你确实需要较强的阴影提亮（Shadows > 40）或高光压缩（HighlightCompr > 30），必须同时给出正向的 Contrast（建议 10~25）或 LocalContrast，避免画面平淡。
+4. 保守原则：如果照片曝光与色彩已经准确，请只返回 1~3 个关键参数，甚至直接返回 {}，不要为了"完成任务"强行增加参数。
+5. 优先"还原"而非"风格化"：除非用户明确要求某种风格，请以中性还原为目标。
+
 请严格返回一个 JSON 对象，不要包含任何其他文字。可选键如下（数值，超出范围会被自动钳位）："""
 
 SYSTEM_PROMPT_FOOTER = """
-若某参数无需调整，可省略该键。"""
+若某参数无需调整，可省略该键。只返回 JSON。"""
 
 
 def build_system_prompt() -> str:
@@ -107,7 +115,8 @@ class ProcessTask(QRunnable):
     def __init__(self, raw_path, output_dir, llm_client,
                  system_prompt, user_prompt, stop_event,
                  output_format="jpg", jpeg_quality=92,
-                 bit_depth="16", output_profile="RT_sRGB"):
+                 bit_depth="16", output_profile="RT_sRGB",
+                 strength=1.0):
         super().__init__()
         self.raw_path = raw_path
         self.output_dir = output_dir
@@ -119,6 +128,7 @@ class ProcessTask(QRunnable):
         self.jpeg_quality = jpeg_quality
         self.bit_depth = bit_depth
         self.output_profile = output_profile
+        self.strength = strength
         self.signals = ProcessTask.Signals()
 
     def run(self):
@@ -129,8 +139,10 @@ class ProcessTask(QRunnable):
         self.signals.started.emit(self.raw_path)
         self.signals.log.emit(f"正在处理: {os.path.basename(self.raw_path)}")
         try:
+            # 把 stop_event 传进 LLM 层，用户点停止时可中断网络请求
             params = self.llm_client.request_json(
-                self.system_prompt, self.user_prompt, self.raw_path)
+                self.system_prompt, self.user_prompt, self.raw_path,
+                stop_event=self.stop_event)
             self.signals.log.emit(
                 f"  LLM 返回参数: {json.dumps(params, ensure_ascii=False)}")
 
@@ -140,7 +152,16 @@ class ProcessTask(QRunnable):
 
             stem = Path(self.raw_path).stem
             pp3_path = os.path.join(self.output_dir, f"{stem}.pp3")
-            generate_pp3(params, pp3_path, output_profile=self.output_profile)
+            # generate_pp3 内部会做强度缩放 + 防发灰护栏，返回实际写入的参数
+            used_params = generate_pp3(
+                params, pp3_path,
+                output_profile=self.output_profile,
+                strength=self.strength,
+            )
+            if used_params != params:
+                self.signals.log.emit(
+                    f"  护栏/缩放后: {json.dumps(used_params, ensure_ascii=False)}")
+
             run_rawtherapee(
                 self.raw_path, pp3_path, self.output_dir,
                 output_format=self.output_format,
@@ -150,6 +171,9 @@ class ProcessTask(QRunnable):
             ext = FORMAT_EXT.get(self.output_format, "jpg")
             self.signals.log.emit(f"  已完成: {stem}.{ext}")
             self.signals.finished.emit(self.raw_path, True, "完成")
+        except InterruptedError:
+            self.signals.log.emit("  已取消（网络请求被中止）")
+            self.signals.finished.emit(self.raw_path, False, "已取消")
         except Exception as e:
             self.signals.log.emit(f"  错误: {str(e)}")
             self.signals.finished.emit(self.raw_path, False, str(e))
@@ -505,6 +529,9 @@ class FileListWidget(QListWidget):
 
 # ----------------------------- 处理页面 -----------------------------
 class ProcessingWidget(QWidget):
+    # 请求主窗口跳到设置页
+    open_settings_requested = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.default_output = os.path.join(os.path.expanduser("~"),
@@ -532,6 +559,8 @@ class ProcessingWidget(QWidget):
         self._custom_loaded, self._custom_errors = autoload_custom_params()
 
         self.init_ui()
+        self._restore_output_settings()
+        self._update_api_status()
 
     # ---------------- UI ----------------
     def init_ui(self):
@@ -603,15 +632,24 @@ class ProcessingWidget(QWidget):
         f_layout.addLayout(list_preview_layout)
         layout.addWidget(file_group)
 
-        llm_group = QGroupBox("2. LLM 配置 (OpenAI 兼容接口)")
-        llm_layout = QFormLayout(llm_group)
-        self.api_base_edit = QLineEdit("https://api.openai.com/v1")
-        llm_layout.addRow("API Base URL:", self.api_base_edit)
-        self.api_key_edit = QLineEdit()
-        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        llm_layout.addRow("API Key:", self.api_key_edit)
-        self.model_edit = QLineEdit("gpt-4o")
-        llm_layout.addRow("Model:", self.model_edit)
+        # 2. LLM 接口（只读状态 + 前往设置）
+        llm_group = QGroupBox("2. LLM 接口")
+        llm_layout = QVBoxLayout(llm_group)
+
+        self.api_status_label = QLabel("")
+        self.api_status_label.setObjectName("apiStatus")
+        self.api_status_label.setWordWrap(True)
+        llm_layout.addWidget(self.api_status_label)
+
+        goto_row = QHBoxLayout()
+        self.btn_goto_settings = QPushButton("前往设置")
+        self.btn_goto_settings.setToolTip("在「设置」页配置 API Base URL、Model 与 API Key")
+        self.btn_goto_settings.clicked.connect(
+            lambda: self.open_settings_requested.emit())
+        goto_row.addWidget(self.btn_goto_settings)
+        goto_row.addStretch()
+        llm_layout.addLayout(goto_row)
+
         layout.addWidget(llm_group)
 
         prompt_group = QGroupBox("3. 提示词设置")
@@ -632,7 +670,7 @@ class ProcessingWidget(QWidget):
 
         self.btn_import_params = QPushButton("导入自定义 JSON")
         self.btn_import_params.setToolTip(
-            "从外部 JSON 文件补充参数定义，可叠加多次导入")
+            "从外部 JSON 文件补充参数定义，可叠加多次导入（也可在「设置」页操作）")
         self.btn_import_params.clicked.connect(self.import_custom_params)
         reload_row.addWidget(self.btn_import_params)
 
@@ -694,6 +732,27 @@ class ProcessingWidget(QWidget):
         cs_row.addStretch()
         out_form.addRow("色彩空间:", cs_row)
 
+        # AI 强度：0% = 原图，100% = 完整应用 LLM 返回的参数
+        strength_row = QHBoxLayout()
+        self.strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.strength_slider.setRange(0, 100)
+        self.strength_slider.setValue(100)
+        self.strength_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.strength_slider.setToolTip(
+            "0% = 不使用 AI 参数（等同原图），100% = 完整应用 LLM 建议值\n"
+            "觉得处理过头/发灰时可以调低，无需重新调用 LLM")
+        strength_row.addWidget(self.strength_slider, 1)
+
+        self.strength_label = QLabel("100%")
+        self.strength_label.setFixedWidth(48)
+        self.strength_label.setAlignment(Qt.AlignmentFlag.AlignRight |
+                                          Qt.AlignmentFlag.AlignVCenter)
+        strength_row.addWidget(self.strength_label)
+
+        self.strength_slider.valueChanged.connect(
+            lambda v: self.strength_label.setText(f"{v}%"))
+        out_form.addRow("AI 强度:", strength_row)
+
         layout.addWidget(out_group)
 
         self.format_combo.currentIndexChanged.connect(self._on_format_changed)
@@ -741,6 +800,61 @@ class ProcessingWidget(QWidget):
         self.is_dark = is_dark
         self.preview_view.set_dark(is_dark)
         self.file_list_widget.viewport().update()
+
+    # ---------------- API 状态 ----------------
+    def reload_api_config(self):
+        """设置页保存后由主窗口调用，刷新顶部状态。"""
+        self._update_api_status()
+
+    def _update_api_status(self):
+        s = load_settings()
+        api_base = s.get("api_base", "").strip()
+        model = s.get("model", "").strip()
+        api_key = get_api_key()
+
+        if not api_base or not model:
+            self.api_status_label.setText(
+                "⚠ 尚未配置 API 接口。请前往「设置」页填写 API Base URL 与 Model。")
+        elif not api_key:
+            self.api_status_label.setText(
+                f"当前接口：{model} @ {api_base}\n"
+                "⚠ 尚未配置 API Key。请前往「设置」页填写。")
+        else:
+            self.api_status_label.setText(
+                f"当前接口：{model} @ {api_base}\n"
+                "API Key：已配置")
+
+    # ---------------- 输出设置持久化 ----------------
+    def _restore_output_settings(self):
+        s = load_settings()
+        od = s.get("output_dir", "").strip()
+        if od and os.path.isdir(od):
+            self.output_dir = od
+        self.out_dir_edit.setText(self.output_dir)
+
+        self.format_combo.setCurrentIndex(int(s.get("output_format", 0)))
+        self.bit_depth_combo.setCurrentIndex(int(s.get("bit_depth", 1)))
+        self.quality_spin.setValue(int(s.get("jpeg_quality", 92)))
+        self.color_space_combo.setCurrentIndex(int(s.get("color_space", 0)))
+        self.parallel_spin.setValue(int(s.get("parallel", MAX_PARALLEL)))
+
+        strength = int(s.get("strength", 100))
+        self.strength_slider.setValue(strength)
+        self.strength_label.setText(f"{strength}%")
+
+    def _persist_output_settings(self):
+        try:
+            s = load_settings()
+            s["output_dir"] = self.out_dir_edit.text().strip()
+            s["output_format"] = self.format_combo.currentIndex()
+            s["bit_depth"] = self.bit_depth_combo.currentIndex()
+            s["jpeg_quality"] = self.quality_spin.value()
+            s["color_space"] = self.color_space_combo.currentIndex()
+            s["parallel"] = self.parallel_spin.value()
+            s["strength"] = self.strength_slider.value()
+            save_settings(s)
+        except Exception:
+            pass
 
     def _on_format_changed(self, index):
         is_jpeg = (index == 0)
@@ -805,13 +919,15 @@ class ProcessingWidget(QWidget):
         self.lbl_reload_hint.setText("已清空自定义参数")
 
     def get_llm_client(self):
-        api_key = self.api_key_edit.text().strip()
+        """从 settings 读取最新 API 配置；被处理页与评价页共用。"""
+        api_key = get_api_key()
         if not api_key:
             return None
+        s = load_settings()
         return LLMClient(
-            api_base=self.api_base_edit.text().strip(),
+            api_base=s.get("api_base", "").strip(),
             api_key=api_key,
-            model=self.model_edit.text().strip()
+            model=s.get("model", "").strip(),
         )
 
     # ---------------- 缩略图懒加载 ----------------
@@ -956,6 +1072,7 @@ class ProcessingWidget(QWidget):
         if d:
             self.output_dir = d
             self.out_dir_edit.setText(d)
+            self._persist_output_settings()
 
     # ---------------- 状态 ----------------
     def _set_item_status(self, file_path, status, color):
@@ -984,8 +1101,10 @@ class ProcessingWidget(QWidget):
         if not targets:
             QMessageBox.information(self, "提示", "请勾选要处理的文件。")
             return
-        if not self.api_key_edit.text().strip():
-            QMessageBox.information(self, "提示", "请输入 API Key。")
+        if not get_api_key():
+            QMessageBox.information(
+                self, "提示",
+                "尚未配置 API Key。请前往「设置」页填写。")
             return
 
         self.output_dir = self.out_dir_edit.text().strip()
@@ -996,6 +1115,10 @@ class ProcessingWidget(QWidget):
         bit_depth = DEPTH_MAP.get(self.bit_depth_combo.currentIndex(), "16")
         output_profile = CS_MAP.get(self.color_space_combo.currentIndex(), "RT_sRGB")
         jpeg_quality = self.quality_spin.value()
+        strength = self.strength_slider.value() / 100.0
+
+        # 记住本批输出设置
+        self._persist_output_settings()
 
         self.process_pool.setMaxThreadCount(self.parallel_spin.value())
 
@@ -1027,6 +1150,7 @@ class ProcessingWidget(QWidget):
                 jpeg_quality=jpeg_quality,
                 bit_depth=bit_depth,
                 output_profile=output_profile,
+                strength=strength,
             )
             task.signals.started.connect(self._on_task_started)
             task.signals.log.connect(self.log_edit.append)

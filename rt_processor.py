@@ -169,6 +169,103 @@ def clear_custom_params() -> None:
             pass
 
 
+# ----------------------------- 参数护栏 / 强度缩放 -----------------------------
+# 这些参数开太猛，画面必然发灰（RawTherapee 会压平动态范围）
+_GUARD_COMPR_LIMITS = {
+    "shadow_compr": 55,      # Exposure 分区：阴影压缩
+    "highlight_compr": 55,   # Exposure 分区：高光压缩
+    "shadows": 55,           # Shadows & Highlights：阴影提亮
+    "highlights": 55,        # Shadows & Highlights：高光恢复
+    "sh_shcompr": 50,        # Shadows & Highlights：SHCompr
+    "sh_hlcompr": 50,        # Shadows & Highlights：HLCompr
+}
+
+_GUARD_TRIGGER = 30          # 超过此值即视为"压缩较猛"
+_GUARD_MAX_COMP = 25         # 自动补偿时 Contrast 的补偿上限
+
+
+def _as_float(d: dict, k: str) -> float:
+    v = d.get(k)
+    if v is None:
+        return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def apply_guardrails(params: dict) -> dict:
+    """
+    对 LLM 返回的参数做保守化处理，防止常见的"发灰 / 发闷 / 发蒙"。
+
+    规则：
+    1) 钳位：把阴影/高光压缩类参数限制在合理上限内；
+    2) 联动：若压缩较猛、又没给出正向对比度，自动补一点 Contrast。
+       如果模型明确给了负对比度（< -5），尊重其意图，不覆盖。
+    """
+    result = dict(params)
+
+    # ---- 1. 上限钳位 ----
+    for key, cap in _GUARD_COMPR_LIMITS.items():
+        if key not in result:
+            continue
+        if _as_float(result, key) > cap:
+            result[key] = cap
+
+    # ---- 2. 联动补偿 ----
+    shadow_aggr = max(
+        _as_float(result, "shadow_compr"),
+        _as_float(result, "shadows"),
+        _as_float(result, "sh_shcompr"),
+    )
+    highlight_aggr = max(
+        _as_float(result, "highlight_compr"),
+        _as_float(result, "highlights"),
+        _as_float(result, "sh_hlcompr"),
+    )
+    worst = max(shadow_aggr, highlight_aggr)
+    cur_contrast = _as_float(result, "contrast")
+
+    if worst > _GUARD_TRIGGER and -5 <= cur_contrast <= 5:
+        # 压缩越多补得越多，上限 25
+        comp = min(_GUARD_MAX_COMP, int((worst - _GUARD_TRIGGER) * 0.5) + 5)
+        result["contrast"] = comp
+
+    return result
+
+
+def scale_strength(params: dict, strength: float) -> dict:
+    """
+    按强度 0.0~1.0 把数值参数向"中性值"插值。
+    用于 UI 的"AI 强度"滑块：strength=0 等同原图，strength=1 保持 LLM 原值。
+
+    - int / float 类型：插值到 neutral（默认 0；tint 的中性值是 1.0）
+    - string / bool 类型：原样保留（它们通常表示模式切换，没有可插值的中间态）
+    """
+    if strength >= 1.0:
+        return dict(params)
+    if strength <= 0.0:
+        return {}
+
+    schema = _load_params()
+    result = {}
+    for k, v in params.items():
+        spec = schema.get(k, {})
+        typ = spec.get("type", "int")
+        if typ not in ("int", "float"):
+            result[k] = v
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            result[k] = v
+            continue
+        neutral = 1.0 if k == "tint" else 0.0
+        scaled = neutral + (fv - neutral) * strength
+        result[k] = int(round(scaled)) if typ == "int" else round(scaled, 4)
+    return result
+
+
 # ----------------------------- pp3 生成 -----------------------------
 SECTION_DEFAULTS = {
     "White Balance": [("Setting", "Custom")],
@@ -186,12 +283,23 @@ def _coerce_bool_to_rt(value) -> str:
     return "true" if is_true else "false"
 
 
-def generate_pp3(params: dict, output_path: str, output_profile: str = "RT_sRGB"):
+def generate_pp3(params: dict, output_path: str,
+                 output_profile: str = "RT_sRGB",
+                 strength: float = 1.0) -> dict:
     """
     根据参数字典生成 RawTherapee 的 .pp3 配置文件。
-    只识别参数表中定义的键，其余忽略；数值会钳位到合法范围。
-    string / bool 类型分别按字符串直写 / true|false 处理。
+
+    内部流程：
+      1) 按 strength 向中性值插值（"AI 强度"滑块）
+      2) 应用 apply_guardrails 防发灰
+      3) 只识别参数表中定义的键，数值钳位到合法范围
+
+    返回实际写入的参数（可能因缩放/护栏而与入参不同），便于日志展示。
     """
+    # 1) 强度缩放 + 2) 防发灰护栏
+    params = scale_strength(params, strength)
+    params = apply_guardrails(params)
+
     schema = _load_params()
     sections = {}
     enabled = set()
@@ -205,10 +313,8 @@ def generate_pp3(params: dict, output_path: str, output_profile: str = "RT_sRGB"
         typ = spec.get("type", "int")
 
         if typ == "string":
-            # 字符串参数（如 "Lab" / 曲线控制点 "0;0;1;1;"）直接写入
             value = str(value)
         elif typ == "bool":
-            # RawTherapee 的 pp3 使用 true / false
             value = _coerce_bool_to_rt(value)
         else:
             lo = spec["min"]
@@ -238,6 +344,8 @@ def generate_pp3(params: dict, output_path: str, output_profile: str = "RT_sRGB"
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+
+    return params
 
 
 def run_rawtherapee(input_raw: str, pp3_file: str, output_dir: str,
