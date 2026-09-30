@@ -21,6 +21,11 @@ from unittest import mock
 import llm_handler
 from llm_handler import LLMClient
 from rt_processor import generate_pp3, run_rawtherapee, check_rt_cli, get_params
+from grouping import (
+    assign_group, build_group_system_prompt, build_group_user_prompt, group_of,
+    merge_group_params, next_group_name, normalize_group_response,
+    partition_targets, prune_groups, ungroup,
+)
 
 
 def render(params):
@@ -199,6 +204,245 @@ class TestPipeline(unittest.TestCase):
         self.assertIn("Compensation=1.0", out)
         self.assertIn("[Shadows & Highlights]", out)
         self.assertIn("Highlights=50", out)
+
+
+# ============================ 组图（统一风格） ============================
+class TestGroupData(unittest.TestCase):
+    def test_assign_and_lookup(self):
+        groups = assign_group({}, ["a.CR2", "b.CR2"], "组 1")
+        self.assertEqual(group_of(groups, "a.CR2"), "组 1")
+        self.assertIsNone(group_of(groups, "z.CR2"))
+
+    def test_file_belongs_to_single_group(self):
+        # 重新分组时应从旧组摘出来，避免一张图出现在两个组里
+        groups = assign_group({}, ["a.CR2"], "组 1")
+        groups = assign_group(groups, ["a.CR2"], "组 2")
+        self.assertEqual(group_of(groups, "a.CR2"), "组 2")
+        self.assertNotIn("组 1", groups)
+
+    def test_assign_does_not_mutate_input(self):
+        original = {}
+        assign_group(original, ["a.CR2"], "组 1")
+        self.assertEqual(original, {})
+
+    def test_ungroup_removes_and_prunes_empty(self):
+        groups = assign_group({}, ["a.CR2", "b.CR2"], "组 1")
+        groups = ungroup(groups, ["a.CR2", "b.CR2"])
+        self.assertEqual(groups, {})
+
+    def test_prune_groups_drops_missing_files(self):
+        groups = assign_group({}, ["a.CR2", "b.CR2"], "组 1")
+        groups = prune_groups(groups, ["a.CR2"])
+        self.assertEqual(groups, {"组 1": ["a.CR2"]})
+
+    def test_next_group_name_avoids_collision(self):
+        self.assertEqual(next_group_name({}), "组 1")
+        self.assertEqual(next_group_name({"组 1": ["a"]}), "组 2")
+        self.assertEqual(next_group_name({"组 2": ["a"]}), "组 1")
+
+
+class TestPartitionTargets(unittest.TestCase):
+    def setUp(self):
+        self.groups = assign_group({}, ["a.CR2", "b.CR2"], "组 1")
+
+    def test_disabled_unify_is_one_batch_per_file(self):
+        batches = partition_targets(["a.CR2", "b.CR2"], self.groups, False)
+        self.assertEqual(batches, [(None, ["a.CR2"]), (None, ["b.CR2"])])
+
+    def test_enabled_unify_merges_group_members(self):
+        batches = partition_targets(["a.CR2", "b.CR2"], self.groups, True)
+        self.assertEqual(batches, [("组 1", ["a.CR2", "b.CR2"])])
+
+    def test_unassigned_files_stay_individual(self):
+        batches = partition_targets(["x.CR2", "a.CR2", "b.CR2", "y.CR2"],
+                                    self.groups, True)
+        self.assertEqual(batches, [
+            (None, ["x.CR2"]),
+            ("组 1", ["a.CR2", "b.CR2"]),
+            (None, ["y.CR2"]),
+        ])
+
+    def test_only_checked_members_are_sent(self):
+        batches = partition_targets(["a.CR2"], self.groups, True)
+        self.assertEqual(batches, [("组 1", ["a.CR2"])])
+
+    def test_two_groups_keep_order(self):
+        groups = assign_group(self.groups, ["c.CR2", "d.CR2"], "组 2")
+        batches = partition_targets(["c.CR2", "a.CR2", "d.CR2", "b.CR2"],
+                                    groups, True)
+        self.assertEqual(batches, [
+            ("组 2", ["c.CR2", "d.CR2"]),
+            ("组 1", ["a.CR2", "b.CR2"]),
+        ])
+
+
+class TestNormalizeGroupResponse(unittest.TestCase):
+    PATHS = ["/photos/a.CR2", "/photos/b.CR2"]
+
+    def test_style_with_positional_photos(self):
+        raw = {"style": {"contrast": 15},
+               "photos": [{"exposure": 0.3}, {}]}
+        style, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(style, {"contrast": 15})
+        self.assertEqual(per_image, [{"exposure": 0.3}, {}])
+
+    def test_photos_keyed_by_filename(self):
+        raw = {"style": {"contrast": 10},
+               "photos": {"B.CR2": {"exposure": -0.5}}}
+        _, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(per_image, [{}, {"exposure": -0.5}])
+
+    def test_photos_keyed_by_index_string(self):
+        raw = {"style": {}, "photos": {"0": {"exposure": 1.0},
+                                       "1": {"exposure": -1.0}}}
+        _, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(per_image, [{"exposure": 1.0}, {"exposure": -1.0}])
+
+    def test_entries_with_file_field_match_by_name(self):
+        raw = {"style": {"saturation": 5},
+               "photos": [{"file": "b.CR2", "params": {"exposure": 0.7}},
+                          {"file": "a.CR2", "params": {"exposure": -0.2}}]}
+        _, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(per_image, [{"exposure": -0.2}, {"exposure": 0.7}])
+
+    def test_bare_list_response(self):
+        raw = [{"exposure": 0.1}, {"exposure": 0.2}]
+        style, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(style, {})
+        self.assertEqual(per_image, [{"exposure": 0.1}, {"exposure": 0.2}])
+
+    def test_short_list_is_padded(self):
+        raw = {"style": {"contrast": 5}, "photos": [{"exposure": 0.1}]}
+        _, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(len(per_image), 2)
+        self.assertEqual(per_image[1], {})
+
+    def test_long_list_is_truncated(self):
+        raw = {"photos": [{"exposure": 1}, {"exposure": 2}, {"exposure": 3}]}
+        _, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(len(per_image), 2)
+
+    def test_alias_keys(self):
+        raw = {"shared": {"contrast": 8}, "images": [{"exposure": 0.4}, {}]}
+        style, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(style, {"contrast": 8})
+        self.assertEqual(per_image[0], {"exposure": 0.4})
+
+    def test_plain_params_dict_treated_as_style(self):
+        raw = {"contrast": 12, "saturation": 6}
+        style, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(style, {"contrast": 12, "saturation": 6})
+        self.assertEqual(per_image, [{}, {}])
+
+    def test_garbage_returns_empty(self):
+        style, per_image = normalize_group_response("not a json shape",
+                                                    self.PATHS)
+        self.assertEqual(style, {})
+        self.assertEqual(per_image, [{}, {}])
+
+    def test_non_dict_entries_ignored(self):
+        raw = {"style": {}, "photos": ["nonsense", 3, None, {"exposure": 0.5}]}
+        _, per_image = normalize_group_response(raw, self.PATHS)
+        self.assertEqual(per_image, [{}, {}])
+
+
+class TestMergeGroupParams(unittest.TestCase):
+    def test_per_image_overrides_style(self):
+        merged = merge_group_params({"contrast": 10, "saturation": 5},
+                                    {"contrast": 25})
+        self.assertEqual(merged, {"contrast": 25, "saturation": 5})
+
+    def test_empty_extra_keeps_style(self):
+        self.assertEqual(merge_group_params({"contrast": 10}, {}),
+                         {"contrast": 10})
+
+    def test_inputs_not_mutated(self):
+        style = {"contrast": 10}
+        merge_group_params(style, {"contrast": 1})
+        self.assertEqual(style, {"contrast": 10})
+
+
+class TestGroupPrompts(unittest.TestCase):
+    def test_group_user_prompt_numbers_files_in_order(self):
+        text = build_group_user_prompt("请给统一风格",
+                                       ["/x/a.CR2", "/x/b.NEF", "/x/c.ARW"])
+        self.assertIn("共 3 张照片", text)
+        self.assertIn("第 1 张：a.CR2", text)
+        self.assertIn("第 3 张：c.ARW", text)
+        self.assertLess(text.index("第 1 张"), text.index("第 2 张"))
+        self.assertIn("请给统一风格", text)
+
+    def test_group_system_suffix_declares_contract(self):
+        prompt = build_group_system_prompt("BASE")
+        self.assertTrue(prompt.startswith("BASE"))
+        self.assertIn('"style"', prompt)
+        self.assertIn('"photos"', prompt)
+        self.assertIn("长度必须等于", prompt)
+
+
+class TestRequestJsonMulti(unittest.TestCase):
+    def _call(self, content, paths, method="multi"):
+        with mock.patch.object(llm_handler, "requests") as m_req, \
+             mock.patch.object(llm_handler, "load_image_base64_from_raw",
+                               return_value="AAAA") as m_load:
+            m_req.post.return_value = _FakeResp(content)
+            client = LLMClient("http://x", "key", "m")
+            if method == "multi":
+                result = client.request_json_multi("sys", "u", paths)
+            else:
+                result = client.request_json("sys", "u", paths[0])
+        return result, m_req, m_load
+
+    def test_sends_one_image_part_per_path_in_order(self):
+        _, m_req, m_load = self._call(
+            '{"style": {}, "photos": []}', ["a.CR2", "b.CR2", "c.CR2"])
+        content = m_req.post.call_args.kwargs["json"]["messages"][1]["content"]
+        images = [c for c in content if c["type"] == "image_url"]
+        self.assertEqual(len(images), 3)
+        self.assertEqual([c["image_url"]["url"] for c in images],
+                         ["data:image/jpeg;base64,AAAA"] * 3)
+        self.assertEqual(m_load.call_count, 3)
+        called = [c.args[0] for c in m_load.call_args_list]
+        self.assertEqual(called, ["a.CR2", "b.CR2", "c.CR2"])
+        # 文本在前，图片依次在后
+        self.assertEqual(content[0]["type"], "text")
+
+    def test_group_response_parsed(self):
+        raw, _, _ = self._call(
+            '{"style": {"contrast": 9}, "photos": [{"exposure": 0.2}, {}]}',
+            ["a.CR2", "b.CR2"])
+        style, per_image = normalize_group_response(raw, ["a.CR2", "b.CR2"])
+        self.assertEqual(style, {"contrast": 9})
+        self.assertEqual(per_image[0], {"exposure": 0.2})
+
+    def test_empty_paths_rejected(self):
+        with self.assertRaises(ValueError):
+            LLMClient("http://x", "key", "m").request_json_multi("s", "u", [])
+
+    def test_single_request_json_still_sends_one_image(self):
+        # 回归：单张调用（照片评价页）行为不变
+        result, m_req, m_load = self._call('{"exposure": 0.5}', ["a.CR2"],
+                                           method="single")
+        content = m_req.post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertEqual(len([c for c in content
+                              if c["type"] == "image_url"]), 1)
+        self.assertEqual(result, {"exposure": 0.5})
+        self.assertEqual(m_load.call_count, 1)
+
+
+class TestGroupPipeline(unittest.TestCase):
+    """组图返回 -> 合并 -> generate_pp3 的端到端衔接。"""
+    def test_style_and_tweak_reach_pp3(self):
+        raw = {"style": {"contrast": 18, "saturation": 8},
+               "photos": [{"exposure": 0.5}, {"exposure": -0.5}]}
+        paths = ["a.CR2", "b.CR2"]
+        style, per_image = normalize_group_response(raw, paths)
+        out_a = render(merge_group_params(style, per_image[0]))
+        out_b = render(merge_group_params(style, per_image[1]))
+        self.assertIn("Contrast=18", out_a)
+        self.assertIn("Compensation=0.5", out_a)
+        self.assertIn("Compensation=-0.5", out_b)
+        self.assertIn("Saturation=8", out_b)
 
 
 if __name__ == "__main__":

@@ -99,25 +99,42 @@ class LLMClient:
                     设置后会在下一个网络数据块到达时中止本次请求
                     （通常 1 秒内生效），抛出 InterruptedError。
         """
-        base64_img = load_image_base64_from_raw(image_path)
+        return self.request_json_multi(
+            system_prompt, user_prompt, [image_path],
+            max_tokens=max_tokens, stop_event=stop_event)
+
+    def request_json_multi(self, system_prompt: str, user_prompt: str,
+                           image_paths, max_tokens=1024,
+                           stop_event=None) -> dict:
+        """
+        一次把多张图片发给视觉 LLM（组图 / 统一风格模式）。
+
+        image_paths 中的图片按顺序出现在 user 消息里，与 user_prompt
+        中的"第 N 张"编号一一对应。其余行为与 request_json 相同。
+        """
+        paths = [p for p in (image_paths or []) if p]
+        if not paths:
+            raise ValueError("request_json_multi 至少需要一张图片")
+
+        content = [{"type": "text", "text": user_prompt}]
+        for path in paths:
+            base64_img = load_image_base64_from_raw(path)
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64_img}",
+                    "detail": "low"
+                }
+            })
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_img}",
-                            "detail": "low"
-                        }
-                    }
-                ]
-            }
+            {"role": "user", "content": content},
         ]
+        return self._post_and_extract(messages, max_tokens, stop_event)
 
+    def _post_and_extract(self, messages, max_tokens, stop_event) -> dict:
+        """发送 messages 并取出第一个完整 JSON 对象。"""
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"

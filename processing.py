@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
     QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QMessageBox,
     QGroupBox, QFormLayout, QProgressBar, QStyledItemDelegate, QStyle,
-    QComboBox, QSpinBox, QScrollArea, QFrame, QSlider
+    QComboBox, QSpinBox, QScrollArea, QFrame, QSlider, QCheckBox, QInputDialog
 )
 
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
@@ -18,6 +18,11 @@ from PyQt6.QtCore import (
 )
 
 from llm_handler import LLMClient, load_image_base64_from_raw
+from grouping import (
+    GROUP_SOFT_LIMIT, assign_group, build_group_system_prompt,
+    build_group_user_prompt, group_of, merge_group_params, next_group_name,
+    normalize_group_response, partition_targets, prune_groups, ungroup,
+)
 from rt_processor import (
     generate_pp3, run_rawtherapee,
     describe_params_for_prompt, reload_params, get_params,
@@ -177,6 +182,124 @@ class ProcessTask(QRunnable):
         except Exception as e:
             self.signals.log.emit(f"  错误: {str(e)}")
             self.signals.finished.emit(self.raw_path, False, str(e))
+
+
+class GroupProcessTask(QRunnable):
+    """
+    组图任务：把同一组的多张 RAW 一次性发给 LLM，拿到"统一风格 + 逐张微调"
+    后再逐个生成 .pp3 并调用 RawTherapee。
+
+    信号与 ProcessTask 保持一致（按文件路径逐个 emit），因此进度统计、
+    状态着色、失败重试等逻辑无需区分两种任务。
+    """
+
+    def __init__(self, group_name, raw_paths, output_dir, llm_client,
+                 system_prompt, user_prompt, stop_event,
+                 output_format="jpg", jpeg_quality=92,
+                 bit_depth="16", output_profile="RT_sRGB",
+                 strength=1.0):
+        super().__init__()
+        self.group_name = group_name
+        self.raw_paths = list(raw_paths)
+        self.output_dir = output_dir
+        self.llm_client = llm_client
+        self.system_prompt = system_prompt
+        self.user_prompt = user_prompt
+        self.stop_event = stop_event
+        self.output_format = output_format
+        self.jpeg_quality = jpeg_quality
+        self.bit_depth = bit_depth
+        self.output_profile = output_profile
+        self.strength = strength
+        self.signals = ProcessTask.Signals()
+        self._finished = set()
+
+    def _emit_finished(self, path, success, message):
+        """每个文件只 emit 一次 finished，避免进度重复计数。"""
+        if path in self._finished:
+            return
+        self._finished.add(path)
+        self.signals.finished.emit(path, success, message)
+
+    def _finish_all(self, success, message):
+        for path in self.raw_paths:
+            self._emit_finished(path, success, message)
+
+    def run(self):
+        # 兜底：任何未预料的异常都不能让组内文件永远停在"处理中"
+        try:
+            self._run()
+        except Exception as e:
+            self.signals.log.emit(f"  组图任务异常: {e}")
+            self._finish_all(False, str(e))
+
+    def _run(self):
+        if self.stop_event.is_set():
+            self._finish_all(False, "已取消")
+            return
+
+        names = ", ".join(os.path.basename(p) for p in self.raw_paths)
+        self.signals.log.emit(
+            f"组图 [{self.group_name}] 共 {len(self.raw_paths)} 张，"
+            f"一次性提交给 LLM：{names}")
+        for path in self.raw_paths:
+            self.signals.started.emit(path)
+
+        # ---- 1) 一次多图请求，取回统一风格 + 逐张微调 ----
+        try:
+            raw = self.llm_client.request_json_multi(
+                self.system_prompt, self.user_prompt, self.raw_paths,
+                max_tokens=4096, stop_event=self.stop_event)
+        except InterruptedError:
+            self.signals.log.emit("  已取消（网络请求被中止）")
+            self._finish_all(False, "已取消")
+            return
+        except Exception as e:
+            self.signals.log.emit(f"  组图请求失败: {e}")
+            self._finish_all(False, f"组图请求失败: {e}")
+            return
+
+        style, per_image = normalize_group_response(raw, self.raw_paths)
+        self.signals.log.emit(
+            f"  统一风格参数: {json.dumps(style, ensure_ascii=False)}")
+
+        # ---- 2) 逐张合并风格并输出 ----
+        for path, extra in zip(self.raw_paths, per_image):
+            name = os.path.basename(path)
+            if self.stop_event.is_set():
+                self._emit_finished(path, False, "已取消")
+                continue
+
+            params = merge_group_params(style, extra)
+            if extra:
+                self.signals.log.emit(
+                    f"  {name} 单张微调: {json.dumps(extra, ensure_ascii=False)}")
+            try:
+                stem = Path(path).stem
+                pp3_path = os.path.join(self.output_dir, f"{stem}.pp3")
+                used_params = generate_pp3(
+                    params, pp3_path,
+                    output_profile=self.output_profile,
+                    strength=self.strength,
+                )
+                if used_params != params:
+                    self.signals.log.emit(
+                        f"  护栏/缩放后: {json.dumps(used_params, ensure_ascii=False)}")
+
+                run_rawtherapee(
+                    path, pp3_path, self.output_dir,
+                    output_format=self.output_format,
+                    jpeg_quality=self.jpeg_quality,
+                    bit_depth=self.bit_depth,
+                )
+                ext = FORMAT_EXT.get(self.output_format, "jpg")
+                self.signals.log.emit(f"  已完成: {stem}.{ext}")
+                self._emit_finished(path, True, "完成")
+            except InterruptedError:
+                self._emit_finished(path, False, "已取消")
+            except Exception as e:
+                self.signals.log.emit(f"  {name} 错误: {str(e)}")
+                self._emit_finished(path, False, str(e))
 
 
 # ----------------------------- 圆形启停按钮 -----------------------------
@@ -394,6 +517,7 @@ class BeforeAfterView(QWidget):
 class FileListDelegate(QStyledItemDelegate):
     StatusRole = Qt.ItemDataRole.UserRole + 1
     StatusColorRole = Qt.ItemDataRole.UserRole + 2
+    GroupRole = Qt.ItemDataRole.UserRole + 3
 
     def __init__(self, owner_widget):
         super().__init__(owner_widget)
@@ -473,11 +597,35 @@ class FileListDelegate(QStyledItemDelegate):
         name = Path(path).name
         painter.setFont(self._font_name)
         painter.setPen(QColor("#ffffff") if is_dark else QColor("#1b1b1b"))
+
+        # 组图徽标（有分组才画），画在文件名右侧
+        name_w = info_w
+        group = index.data(self.GroupRole)
+        if group:
+            fm = painter.fontMetrics()
+            pill_w = fm.horizontalAdvance(group) + 16
+            pill_h = 18
+            pill = QRect(name_rect.right() - pill_w,
+                         name_rect.top() + (name_rect.height() - pill_h) // 2,
+                         pill_w, pill_h)
+            name_w = max(40, pill.left() - name_rect.left() - 8)
+
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#2563eb") if is_dark else QColor("#dbeafe"))
+            painter.drawRoundedRect(pill, pill_h / 2, pill_h / 2)
+            painter.setPen(QColor("white") if is_dark else QColor("#1d4ed8"))
+            painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, group)
+            painter.restore()
+
+            painter.setFont(self._font_name)
+            painter.setPen(QColor("#ffffff") if is_dark else QColor("#1b1b1b"))
+
         painter.drawText(
             name_rect,
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
             painter.fontMetrics().elidedText(
-                name, Qt.TextElideMode.ElideMiddle, info_w))
+                name, Qt.TextElideMode.ElideMiddle, name_w))
 
         status = index.data(self.StatusRole) or "待处理"
         status_color = index.data(self.StatusColorRole) or "#888888"
@@ -543,6 +691,8 @@ class ProcessingWidget(QWidget):
         self._thumb_loading = set()
         self._preview_file = None
         self.failed_paths = set()
+        # 组图：{组名: [文件路径, ...]}
+        self.groups = {}
 
         self.stop_event = threading.Event()
         self.processing = False
@@ -598,16 +748,44 @@ class ProcessingWidget(QWidget):
         self.btn_check_all.clicked.connect(lambda: self._set_all_checks(True))
         self.btn_uncheck_all = QPushButton("全不选")
         self.btn_uncheck_all.clicked.connect(lambda: self._set_all_checks(False))
+
+        self.btn_group = QPushButton("设为一组")
+        self.btn_group.setToolTip(
+            "把当前勾选的照片归为同一组：开启「统一风格」后，\n"
+            "整组会一次性发送给 LLM，得到统一风格 + 逐张微调")
+        self.btn_group.clicked.connect(self.assign_group_dialog)
+
+        self.btn_ungroup = QPushButton("取消分组")
+        self.btn_ungroup.setToolTip("把当前勾选的照片移出所在组")
+        self.btn_ungroup.clicked.connect(self.remove_group)
+
         for b in (self.btn_add, self.btn_clear,
-                  self.btn_check_all, self.btn_uncheck_all):
+                  self.btn_check_all, self.btn_uncheck_all,
+                  self.btn_group, self.btn_ungroup):
             btn_layout.addWidget(b)
         btn_layout.addStretch()
         f_layout.addLayout(btn_layout)
+
+        group_row = QHBoxLayout()
+        self.unify_check = QCheckBox("统一风格：同组照片一次提交给 LLM")
+        self.unify_check.setToolTip(
+            "勾选后，同一组的多张照片会合并成一次请求，由 LLM 给出统一风格；\n"
+            "未分组的照片仍按单张处理")
+        self.unify_check.stateChanged.connect(self._on_unify_changed)
+        group_row.addWidget(self.unify_check)
+
+        self.group_hint_label = QLabel("")
+        self.group_hint_label.setObjectName("reloadHint")
+        group_row.addWidget(self.group_hint_label)
+        group_row.addStretch()
+        f_layout.addLayout(group_row)
 
         list_preview_layout = QHBoxLayout()
         self.file_list_widget = FileListWidget(self)
         self.file_list_widget.setItemDelegate(FileListDelegate(self))
         self.file_list_widget.currentRowChanged.connect(self.update_preview)
+        self.file_list_widget.checkToggled.connect(
+            lambda _p: self._update_group_hint())
         self.file_list_widget.verticalScrollBar().valueChanged.connect(
             self._scan_visible)
         list_preview_layout.addWidget(self.file_list_widget, 1)
@@ -842,6 +1020,9 @@ class ProcessingWidget(QWidget):
         self.strength_slider.setValue(strength)
         self.strength_label.setText(f"{strength}%")
 
+        self.unify_check.setChecked(bool(s.get("unify_style", False)))
+        self._update_group_hint()
+
     def _persist_output_settings(self):
         try:
             s = load_settings()
@@ -852,6 +1033,7 @@ class ProcessingWidget(QWidget):
             s["color_space"] = self.color_space_combo.currentIndex()
             s["parallel"] = self.parallel_spin.value()
             s["strength"] = self.strength_slider.value()
+            s["unify_style"] = self.unify_check.isChecked()
             save_settings(s)
         except Exception:
             pass
@@ -982,6 +1164,7 @@ class ProcessingWidget(QWidget):
 
         if lw.currentRow() < 0:
             lw.setCurrentRow(0)
+        self._refresh_group_display()
         self._scan_visible()
 
     def _set_all_checks(self, checked):
@@ -993,6 +1176,83 @@ class ProcessingWidget(QWidget):
             for i in range(lw.count()):
                 lw.checked_paths.add(lw.item(i).data(Qt.ItemDataRole.UserRole))
         lw.viewport().update()
+        self._update_group_hint()
+
+    # ---------------- 组图管理 ----------------
+    def _checked_paths_ordered(self):
+        """按列表顺序返回勾选的文件。"""
+        lw = self.file_list_widget
+        return [lw.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(lw.count())
+                if lw.item(i).data(Qt.ItemDataRole.UserRole) in lw.checked_paths]
+
+    def assign_group_dialog(self):
+        if self.processing:
+            return
+        paths = self._checked_paths_ordered()
+        if not paths:
+            QMessageBox.information(self, "提示", "请先勾选要归为一组的照片。")
+            return
+
+        name, ok = QInputDialog.getText(
+            self, "设为一组",
+            f"把勾选的 {len(paths)} 张照片归为同一组，组名：",
+            text=next_group_name(self.groups))
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.information(self, "提示", "组名不能为空。")
+            return
+
+        self.groups = assign_group(self.groups, paths, name)
+        self._refresh_group_display()
+        self.log_edit.append(
+            f"已把 {len(paths)} 张照片设为组「{name}」。"
+            f"开启「统一风格」后它们会一次性提交给 LLM。")
+
+    def remove_group(self):
+        if self.processing:
+            return
+        paths = self._checked_paths_ordered()
+        if not paths:
+            QMessageBox.information(self, "提示", "请先勾选要取消分组的照片。")
+            return
+        self.groups = ungroup(self.groups, paths)
+        self._refresh_group_display()
+        self.log_edit.append(f"已取消 {len(paths)} 张照片的分组。")
+
+    def _refresh_group_display(self):
+        lw = self.file_list_widget
+        in_list = [lw.item(i).data(Qt.ItemDataRole.UserRole)
+                   for i in range(lw.count())]
+        # 列表里已不存在的文件不应继续留在分组中
+        self.groups = prune_groups(self.groups, in_list)
+        for i in range(lw.count()):
+            item = lw.item(i)
+            path = item.data(Qt.ItemDataRole.UserRole)
+            item.setData(FileListDelegate.GroupRole, group_of(self.groups, path))
+        lw.viewport().update()
+        self._update_group_hint()
+
+    def _on_unify_changed(self, _state=None):
+        self._update_group_hint()
+
+    def _update_group_hint(self):
+        if self.processing:
+            return
+        checked = self._checked_paths_ordered()
+        batches = partition_targets(checked, self.groups, self.unify_check.isChecked())
+        big = [b for b in batches if b[0] is not None]
+        if not big:
+            self.group_hint_label.setText(
+                "按单张处理（可勾选照片后点「设为一组」）")
+            return
+        parts = ", ".join(f"{name}({len(members)}张)" for name, members in big)
+        text = f"组图批次：{parts}"
+        if any(len(members) > GROUP_SOFT_LIMIT for _, members in big):
+            text += f" ⚠ 超过 {GROUP_SOFT_LIMIT} 张建议拆组，避免超时/超 token"
+        self.group_hint_label.setText(text)
 
     def clear_files(self):
         if self.processing:
@@ -1002,9 +1262,11 @@ class ProcessingWidget(QWidget):
         self._thumb_cache.clear()
         self._thumb_loading.clear()
         self.failed_paths.clear()
+        self.groups = {}
         self._preview_file = None
         self.btn_retry.setEnabled(False)
         self.preview_view.clear()
+        self._update_group_hint()
 
     # ---------------- 预览 / 对比 ----------------
     def update_preview(self, row):
@@ -1133,7 +1395,8 @@ class ProcessingWidget(QWidget):
         self.btn_stop.setEnabled(True)
         self.btn_retry.setEnabled(False)
         for b in (self.btn_add, self.btn_clear,
-                  self.btn_check_all, self.btn_uncheck_all):
+                  self.btn_check_all, self.btn_uncheck_all,
+                  self.btn_group, self.btn_ungroup):
             b.setEnabled(False)
 
         for f in targets:
@@ -1142,20 +1405,47 @@ class ProcessingWidget(QWidget):
         system_prompt = self.system_prompt_edit.toPlainText()
         user_prompt = self.user_prompt_edit.text()
 
-        for raw_path in targets:
-            task = ProcessTask(
-                raw_path, self.output_dir, llm_client,
-                system_prompt, user_prompt, self.stop_event,
-                output_format=output_format,
-                jpeg_quality=jpeg_quality,
-                bit_depth=bit_depth,
-                output_profile=output_profile,
-                strength=strength,
-            )
+        unify = self.unify_check.isChecked()
+        batches = partition_targets(targets, self.groups, unify)
+        group_batches = [b for b in batches if b[0] is not None and len(b[1]) > 1]
+        if unify:
+            self.log_edit.append(
+                f"统一风格模式：{len(group_batches)} 个组将一次性提交给 LLM，"
+                f"其余 {len(targets) - sum(len(m) for _, m in group_batches)} 张按单张处理。")
+            for name, members in group_batches:
+                self._set_group_status(members, "组队中", COLOR_PENDING)
+
+        for name, members in batches:
+            if name is not None and len(members) > 1:
+                task = GroupProcessTask(
+                    name, members, self.output_dir, llm_client,
+                    build_group_system_prompt(system_prompt),
+                    build_group_user_prompt(user_prompt, members),
+                    self.stop_event,
+                    output_format=output_format,
+                    jpeg_quality=jpeg_quality,
+                    bit_depth=bit_depth,
+                    output_profile=output_profile,
+                    strength=strength,
+                )
+            else:
+                task = ProcessTask(
+                    members[0], self.output_dir, llm_client,
+                    system_prompt, user_prompt, self.stop_event,
+                    output_format=output_format,
+                    jpeg_quality=jpeg_quality,
+                    bit_depth=bit_depth,
+                    output_profile=output_profile,
+                    strength=strength,
+                )
             task.signals.started.connect(self._on_task_started)
             task.signals.log.connect(self.log_edit.append)
             task.signals.finished.connect(self._on_task_finished)
             self.process_pool.start(task)
+
+    def _set_group_status(self, paths, status, color):
+        for path in paths:
+            self._set_item_status(path, status, color)
 
     def _on_task_started(self, file_path):
         self._set_item_status(file_path, "处理中", COLOR_RUNNING)
@@ -1198,9 +1488,11 @@ class ProcessingWidget(QWidget):
         self.btn_process.setEnabled(True)
         self.btn_stop.setEnabled(False)
         for b in (self.btn_add, self.btn_clear,
-                  self.btn_check_all, self.btn_uncheck_all):
+                  self.btn_check_all, self.btn_uncheck_all,
+                  self.btn_group, self.btn_ungroup):
             b.setEnabled(True)
         self.btn_retry.setEnabled(bool(self.failed_paths))
+        self._update_group_hint()
 
         if self.stop_event.is_set():
             self.log_edit.append("处理已停止。")

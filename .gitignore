@@ -6,3 +6,13 @@ __pycache__/
 
 # 本地参考用的第三方 profile（从外部拷入，不纳入版本库）
 reference/
+
+#以下三个是打包产物
+dist/
+
+build/
+
+*.spec.bak
+
+# 遗留的旧版本备份文件
+main.py.old

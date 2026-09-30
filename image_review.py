@@ -175,6 +175,7 @@ class ReviewThread(QThread):
                 user_prompt += f"\n拍摄者的描述：{self.description}"
             result = self.llm_client.request_json(
                 REVIEW_SYSTEM_PROMPT, user_prompt, self.image_path,
+                max_tokens=4096, 
                 stop_event=self.stop_event)
             self.result.emit(result)
         except InterruptedError:

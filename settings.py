@@ -38,6 +38,7 @@ DEFAULT_SETTINGS = {
     "color_space": 0,
     "parallel": 3,
     "strength": 100,
+    "unify_style": False,
 }
 
 
