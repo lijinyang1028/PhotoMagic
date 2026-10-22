@@ -1,10 +1,15 @@
 """关于页：项目信息、合作者、API 注册指引"""
+import logging
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
     QTextEdit, QPushButton, QScrollArea, QFrame
 )
 from PyQt6.QtGui import QDesktopServices, QFont, QPainter, QColor, QPen
 from PyQt6.QtCore import Qt, QUrl, QRect
+
+
+logger = logging.getLogger(__name__)
 
 
 REPO_URL = "https://github.com/lijinyang1028/photomagic.git"
@@ -86,6 +91,8 @@ class AboutWidget(QWidget):
         self.is_dark = True
         self._avatar_labels = []
         self.init_ui()
+        logger.info("关于页初始化完成：版本 v%s，贡献者 %d 位",
+                    VERSION, len(CONTRIBUTORS))
 
     def init_ui(self):
         outer = QVBoxLayout(self)

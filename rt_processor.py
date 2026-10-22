@@ -4,9 +4,12 @@ RawTherapee 处理模块
 """
 import os
 import json
+import logging
 import subprocess
 import shutil
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA_PATH = Path(__file__).with_name("params_schema.json")
 CUSTOM_PARAMS_PATH = Path.home() / ".photomagic_custom_params.json"
@@ -20,6 +23,8 @@ def _load_params():
     if _PARAMS_CACHE is None:
         with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
             _PARAMS_CACHE = json.load(f)
+        logger.info("已加载参数表 %s（%d 个参数）",
+                    _SCHEMA_PATH, len(_PARAMS_CACHE))
     return _PARAMS_CACHE
 
 
@@ -31,13 +36,16 @@ def get_params():
 def get_builtin_param_names() -> set:
     """返回内置 schema 中定义的所有参数名。"""
     with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
-        return set(json.load(f).keys())
+        names = set(json.load(f).keys())
+    logger.info("读取内置参数名 %d 个", len(names))
+    return names
 
 
 def reload_params():
     """清缓存，下次调用重新读 JSON。"""
     global _PARAMS_CACHE
     _PARAMS_CACHE = None
+    logger.info("已清空参数表缓存，下次访问将重新读取 %s", _SCHEMA_PATH)
 
 
 def merge_params(extra: dict):
@@ -45,6 +53,8 @@ def merge_params(extra: dict):
     base = dict(_load_params())
     base.update(extra)
     _PARAMS_CACHE = base
+    logger.info("已合并 %d 个参数定义，当前共 %d 个（新增/覆盖: %s）",
+                len(extra), len(base), ", ".join(list(extra)[:20]) or "无")
 
 
 def describe_params_for_prompt() -> str:
@@ -83,6 +93,8 @@ def validate_custom_params(data: dict) -> tuple:
     errors = []
 
     if not isinstance(data, dict):
+        logger.error("自定义参数校验失败：顶层必须是 JSON 对象（实际 %s）",
+                     type(data).__name__)
         return {}, ["顶层必须是 JSON 对象"]
 
     for name, raw in data.items():
@@ -117,6 +129,10 @@ def validate_custom_params(data: dict) -> tuple:
         spec.setdefault("desc", name)
         valid[name] = spec
 
+    logger.info("自定义参数校验完成：合法 %d 个，跳过 %d 个",
+                len(valid), len(errors))
+    for err in errors:
+        logger.warning("自定义参数被跳过: %s", err)
     return valid, errors
 
 
@@ -125,15 +141,19 @@ def load_custom_params(path) -> tuple:
     从指定 JSON 文件加载并合并到当前参数表。
     返回 (成功加载数量, 错误信息列表)。
     """
+    logger.info("开始导入自定义参数: %s", path)
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
+        logger.error("读取自定义参数文件失败 %s: %s", path, e)
         return 0, [f"读取失败: {e}"]
 
     valid, errors = validate_custom_params(data)
     if valid:
         merge_params(valid)
+    logger.info("自定义参数导入结束 %s：成功 %d 个，错误 %d 个",
+                path, len(valid), len(errors))
     return len(valid), errors
 
 
@@ -147,15 +167,21 @@ def save_custom_params(path=None) -> None:
     custom = {k: v for k, v in current.items() if k not in builtin_names}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(custom, f, ensure_ascii=False, indent=2)
+    logger.info("已保存自定义参数 %d 个到 %s", len(custom), path)
 
 
 def autoload_custom_params() -> tuple:
     """启动时自动加载上次保存的自定义参数（若存在）。"""
     try:
         if CUSTOM_PARAMS_PATH.exists():
-            return load_custom_params(CUSTOM_PARAMS_PATH)
+            count, errors = load_custom_params(CUSTOM_PARAMS_PATH)
+            logger.info("自动加载自定义参数 %s：%d 个（错误 %d 个）",
+                        CUSTOM_PARAMS_PATH, count, len(errors))
+            return count, errors
     except Exception as e:
+        logger.error("自动加载自定义参数失败 %s: %s", CUSTOM_PARAMS_PATH, e)
         return 0, [f"自动加载失败: {e}"]
+    logger.info("没有已保存的自定义参数文件: %s", CUSTOM_PARAMS_PATH)
     return 0, []
 
 
@@ -165,8 +191,11 @@ def clear_custom_params() -> None:
     if CUSTOM_PARAMS_PATH.exists():
         try:
             CUSTOM_PARAMS_PATH.unlink()
-        except OSError:
-            pass
+            logger.info("已删除自定义参数文件 %s", CUSTOM_PARAMS_PATH)
+        except OSError as e:
+            logger.warning("删除自定义参数文件失败 %s: %s", CUSTOM_PARAMS_PATH, e)
+    else:
+        logger.info("自定义参数文件不存在，无需删除: %s", CUSTOM_PARAMS_PATH)
 
 
 # ----------------------------- 参数护栏 / 强度缩放 -----------------------------
@@ -210,6 +239,8 @@ def apply_guardrails(params: dict) -> dict:
         if key not in result:
             continue
         if _as_float(result, key) > cap:
+            logger.info("护栏钳位: %s %s -> %s（上限 %s）",
+                        key, result[key], cap, cap)
             result[key] = cap
 
     # ---- 2. 联动补偿 ----
@@ -230,6 +261,11 @@ def apply_guardrails(params: dict) -> dict:
         # 压缩越多补得越多，上限 25
         comp = min(_GUARD_MAX_COMP, int((worst - _GUARD_TRIGGER) * 0.5) + 5)
         result["contrast"] = comp
+        logger.info("护栏联动补偿: 压缩强度 %.1f -> 自动添加 Contrast=%d",
+                    worst, comp)
+    else:
+        logger.info("护栏检查通过（压缩强度 %.1f，Contrast %.1f）",
+                    worst, cur_contrast)
 
     return result
 
@@ -243,8 +279,11 @@ def scale_strength(params: dict, strength: float) -> dict:
     - string / bool 类型：原样保留（它们通常表示模式切换，没有可插值的中间态）
     """
     if strength >= 1.0:
+        logger.info("AI 强度 %.2f：保持 LLM 原始参数（%d 个键）",
+                    strength, len(params))
         return dict(params)
     if strength <= 0.0:
+        logger.info("AI 强度 %.2f：忽略全部 LLM 参数，等同原图", strength)
         return {}
 
     schema = _load_params()
@@ -263,6 +302,8 @@ def scale_strength(params: dict, strength: float) -> dict:
         neutral = 1.0 if k == "tint" else 0.0
         scaled = neutral + (fv - neutral) * strength
         result[k] = int(round(scaled)) if typ == "int" else round(scaled, 4)
+    logger.info("AI 强度 %.2f：已把 %d 个数值参数向中性值缩放",
+                strength, len(params))
     return result
 
 
@@ -303,10 +344,12 @@ def generate_pp3(params: dict, output_path: str,
     schema = _load_params()
     sections = {}
     enabled = set()
+    ignored = []
 
     for name, value in params.items():
         spec = schema.get(name)
         if not spec:
+            ignored.append(name)
             continue
         section = spec["section"]
         key = spec["key"]
@@ -321,13 +364,22 @@ def generate_pp3(params: dict, output_path: str,
             hi = spec["max"]
             conv = float if typ == "float" else int
             try:
-                value = conv(max(lo, min(hi, value)))
+                clamped = conv(max(lo, min(hi, value)))
             except (TypeError, ValueError):
+                logger.warning("参数 %s 的值无法转换，已忽略: %r", name, value)
                 continue
+            if clamped != value and isinstance(value, (int, float)):
+                logger.info("参数 %s 越界，已钳位: %s -> %s（%s~%s）",
+                            name, value, clamped, lo, hi)
+            value = clamped
 
         sections.setdefault(section, []).append((key, value))
         if spec.get("enable", False):
             enabled.add(section)
+
+    if ignored:
+        logger.info("忽略 %d 个参数表中未定义的键: %s",
+                    len(ignored), ", ".join(map(str, ignored[:20])))
 
     sections.setdefault("Output", []).append(("OutputProfile", output_profile))
 
@@ -345,6 +397,9 @@ def generate_pp3(params: dict, output_path: str,
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
+    logger.info("已生成 .pp3: %s（%d 个段落，启用段落 %s，输出色彩空间 %s）",
+                output_path, len(sections),
+                "、".join(sorted(enabled)) or "无", output_profile)
     return params
 
 
@@ -372,11 +427,25 @@ def run_rawtherapee(input_raw: str, pp3_file: str, output_dir: str,
 
     cmd.append(input_raw)
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    logger.info("调用 rawtherapee-cli: %s（格式 %s，位深 %s，质量 %s）",
+                " ".join(cmd), output_format, bit_depth, jpeg_quality)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError as e:
+        logger.error("未找到 rawtherapee-cli，无法处理 %s: %s", input_raw, e)
+        raise
+    logger.info("rawtherapee-cli 返回码 %d，stdout %d 字符，stderr %d 字符",
+                proc.returncode, len(proc.stdout or ""), len(proc.stderr or ""))
     if proc.returncode != 0:
+        logger.error("rawtherapee-cli 执行失败（%s）: %s",
+                     input_raw, (proc.stderr or "").strip())
         raise RuntimeError(f"rawtherapee-cli 执行失败:\n{proc.stderr.strip()}")
+    if proc.stderr and proc.stderr.strip():
+        logger.info("rawtherapee-cli 警告信息: %s", proc.stderr.strip()[:500])
 
 
 def check_rt_cli():
     """检查 rawtherapee-cli 是否可用"""
-    return shutil.which("rawtherapee-cli") is not None
+    found = shutil.which("rawtherapee-cli")
+    logger.info("检查 rawtherapee-cli: %s", found or "未找到")
+    return found is not None

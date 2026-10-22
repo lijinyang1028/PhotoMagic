@@ -1,4 +1,6 @@
 """主程序 GUI - PyQt6"""
+import logging
+import os
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -14,7 +16,10 @@ from settings_page import SettingsPage    #设置页
 from rt_processor import check_rt_cli   #RT处理
 from about import AboutWidget    #关于页
 from settings import ensure_config_dir, migrate_legacy_files
+from log_setup import setup_logging, get_log_file
 
+
+logger = logging.getLogger(__name__)
 
 NAV_ITEMS = ["处理", "照片评价", "设置", "关于"]
 
@@ -22,6 +27,7 @@ NAV_ITEMS = ["处理", "照片评价", "设置", "关于"]
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        logger.info("初始化主窗口（标题「RAW 照片 AI 处理助手」，尺寸 1100x760）")
         self.setWindowTitle("RAW 照片 AI 处理助手")
         self.resize(1100, 760)
         self.sidebar_expanded_width = 240
@@ -30,6 +36,7 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)
         self.check_dependencies()
+        logger.info("主窗口初始化完成，日志文件：%s", get_log_file())
 
     def init_ui(self):
         central = QWidget()
@@ -94,11 +101,13 @@ class MainWindow(QMainWindow):
         # 处理页「前往设置」按钮跳转到设置标签
         self.processing_widget.open_settings_requested.connect(
             lambda: self.sidebar.setCurrentRow(2))
+        logger.info("界面构建完成：导航项 %s", "、".join(NAV_ITEMS))
 
     def apply_theme(self, scheme=None):
         if scheme is None:
             scheme = QGuiApplication.styleHints().colorScheme()
         is_dark = scheme == Qt.ColorScheme.Dark
+        logger.info("应用主题: %s", "深色" if is_dark else "浅色")
 
         if is_dark:
             qss = """
@@ -276,29 +285,41 @@ class MainWindow(QMainWindow):
         if sizes[0] > 0:
             self.sidebar_expanded_width = sizes[0]
             self.splitter.setSizes([0, sizes[1] + sizes[0]])
+            logger.info("折叠侧边栏（记录宽度 %d）", self.sidebar_expanded_width)
         else:
             self.splitter.setSizes([self.sidebar_expanded_width, sizes[1] - self.sidebar_expanded_width])
+            logger.info("展开侧边栏（宽度 %d）", self.sidebar_expanded_width)
 
     def on_nav_changed(self, row):
         if 0 <= row < self.stack.count():
             self.stack.setCurrentIndex(row)
         if 0 <= row < len(NAV_ITEMS):
             self.title_label.setText(NAV_ITEMS[row])
+        logger.info("切换页面: 第 %d 项 %s", row,
+                    NAV_ITEMS[row] if 0 <= row < len(NAV_ITEMS) else "未知")
 
     def check_dependencies(self):
-        if not check_rt_cli():
+        found = check_rt_cli()
+        logger.info("依赖检查 rawtherapee-cli: %s", "已找到" if found else "未找到")
+        if not found:
             QMessageBox.warning(self, "依赖缺失",
                 "未检测到 rawtherapee-cli，请安装 RawTherapee 并将其路径添加到环境变量。")
 
 
 def main():
+    log_file = setup_logging()
+    logger.info("PhotoMagic 启动，Python %s，工作目录 %s",
+                sys.version.split()[0], os.getcwd())
     ensure_config_dir()
     migrate_legacy_files()
     app = QApplication(sys.argv)
     app.setStyle("fusion")
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    logger.info("窗口已显示，进入事件循环（日志：%s）", log_file)
+    exit_code = app.exec()
+    logger.info("事件循环结束，退出码 %d", exit_code)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

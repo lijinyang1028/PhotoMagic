@@ -12,13 +12,19 @@ PhotoMagic 代码变更的单元测试（标准库 unittest，无额外依赖）
 """
 
 import json
+import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
+import uuid
+from pathlib import Path
 from unittest import mock
 
 import llm_handler
+import log_setup
+import settings
 from llm_handler import LLMClient
 from rt_processor import generate_pp3, run_rawtherapee, check_rt_cli, get_params
 from grouping import (
@@ -443,6 +449,384 @@ class TestGroupPipeline(unittest.TestCase):
         self.assertIn("Compensation=0.5", out_a)
         self.assertIn("Compensation=-0.5", out_b)
         self.assertIn("Saturation=8", out_b)
+
+
+# ============================ 日志（INFO / 保留最近 5 次） ============================
+class TestLogSetup(unittest.TestCase):
+    def setUp(self):
+        # 每个用例都从干净的日志状态开始，避免相互污染
+        log_setup._configured = False
+        log_setup._current_log_file = None
+        log_setup._current_log_dir = None
+        # 用系统临时目录，避免在仓库里留下测试产物。
+        # 注意：这里用 os.mkdir 而不是 tempfile.mkdtemp —— 后者在 Windows 上
+        # 会以 0700 的 ACL 建目录，在一些受限环境下反而写不进去。
+        self.tmp = os.path.join(
+            tempfile.gettempdir(),
+            f"photomagic_logs_{os.getpid()}_{uuid.uuid4().hex[:8]}")
+        os.mkdir(self.tmp)
+        self.root = logging.getLogger()
+        self._saved_level = self.root.level
+
+    def tearDown(self):
+        log_setup._remove_own_handlers(self.root)
+        self.root.setLevel(self._saved_level)
+        log_setup._configured = False
+        log_setup._current_log_file = None
+        log_setup._current_log_dir = None
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _flush(self):
+        for handler in self.root.handlers:
+            handler.flush()
+
+    def test_writes_info_to_photomagic_dir(self):
+        path = log_setup.setup_logging(
+            log_dir=self.tmp, console=False, force=True)
+        self.assertEqual(os.path.dirname(str(path)), self.tmp)
+        self.assertTrue(os.path.basename(str(path)).startswith("photomagic_"))
+        self.assertTrue(os.path.basename(str(path)).endswith(".log"))
+
+        logging.getLogger("test.module").info("hello-info-中文")
+        self._flush()
+        text = Path(path).read_text(encoding="utf-8")
+        self.assertIn("hello-info-中文", text)
+        self.assertIn("INFO", text)
+        self.assertIn("test.module", text)
+
+    def test_default_level_is_info(self):
+        log_setup.setup_logging(log_dir=self.tmp, console=False, force=True)
+        self.assertEqual(self.root.level, logging.INFO)
+        logger = logging.getLogger("test.level")
+        logger.debug("debug-应被丢弃")
+        logger.info("info-应保留")
+        self._flush()
+        text = Path(log_setup.get_log_file()).read_text(encoding="utf-8")
+        self.assertIn("info-应保留", text)
+        self.assertNotIn("debug-应丢弃", text)
+
+    def test_prune_keeps_recent_five(self):
+        # 造 8 个不同时间的日志，只应保留最新的 5 个
+        created = []
+        for i in range(8):
+            p = Path(self.tmp) / f"photomagic_2024010{i}_000000_100{i}.log"
+            p.write_text(f"log {i}", encoding="utf-8")
+            os.utime(p, (1_000_000 + i, 1_000_000 + i))
+            created.append(p)
+
+        removed = log_setup.prune_log_files(5, self.tmp)
+        remaining = log_setup.list_log_files(self.tmp)
+
+        self.assertEqual(len(remaining), 5)
+        self.assertEqual(len(removed), 3)
+        # 最旧的 3 个被删，最新的 5 个还在
+        self.assertEqual(set(removed), set(created[:3]))
+        self.assertEqual(remaining[0], created[7])
+
+    def test_setup_keeps_only_five_runs(self):
+        # 预置 6 个旧日志，再启动一次：总数仍为 5
+        for i in range(6):
+            p = Path(self.tmp) / f"photomagic_2024010{i}_000000_100{i}.log"
+            p.write_text("old", encoding="utf-8")
+            os.utime(p, (500_000 + i, 500_000 + i))
+
+        log_setup.setup_logging(
+            log_dir=self.tmp, console=False, keep=5, force=True)
+        files = log_setup.list_log_files(self.tmp)
+        self.assertEqual(len(files), 5)
+        self.assertIn(Path(log_setup.get_log_file()), files)
+
+    def test_repeated_setup_is_idempotent(self):
+        first = log_setup.setup_logging(
+            log_dir=self.tmp, console=False, force=True)
+        second = log_setup.setup_logging(log_dir=self.tmp, console=False)
+        self.assertEqual(str(first), str(second))
+
+    def test_unwritable_dir_degrades_without_crashing(self):
+        # 目录不可写时不改写到别处、也不抛异常：返回 None，只输出到控制台
+        blocker = Path(self.tmp) / "not_a_dir"
+        blocker.write_text("x", encoding="utf-8")     # 文件冒充目录 -> mkdir 失败
+        result = log_setup.setup_logging(
+            log_dir=str(blocker / "logs"), console=False, force=True)
+        self.assertIsNone(result)
+        self.assertIsNone(log_setup.get_log_file())
+
+    def test_default_dir_is_photomagic_logs(self):
+        # 默认（且唯一）的落盘位置就是 ~/.photomagic/logs
+        self.assertEqual(log_setup._resolve_dir(), Path(log_setup.LOG_DIR))
+        self.assertEqual(Path(log_setup.LOG_DIR).name, "logs")
+        self.assertEqual(Path(log_setup.LOG_DIR).parent.name, ".photomagic")
+
+
+# ============================ 多套 API 配置方案 ============================
+def _fake_keyring(store):
+    """用 dict 模拟 keyring 的 get/set/delete_password。"""
+    fake = mock.Mock()
+
+    def _get(service, user):
+        return store.get(user)
+
+    def _set(service, user, value):
+        store[user] = value
+
+    def _delete(service, user):
+        if user not in store:
+            raise KeyError(user)
+        del store[user]
+
+    fake.get_password.side_effect = _get
+    fake.set_password.side_effect = _set
+    fake.delete_password.side_effect = _delete
+    return fake
+
+
+class TestApiProfiles(unittest.TestCase):
+    """多套「模型 + API Key」配置方案：迁移、切换、隔离、校验、删除。"""
+
+    def setUp(self):
+        # 用系统临时目录，避免污染真实 ~/.photomagic（也不在仓库留产物）
+        self.tmp = Path(tempfile.gettempdir()) / (
+            f"photomagic_settings_{os.getpid()}_{uuid.uuid4().hex[:8]}")
+        os.mkdir(self.tmp)
+        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
+
+        self._patches = [
+            mock.patch.object(settings, "CONFIG_DIR", self.tmp),
+            mock.patch.object(settings, "SETTINGS_FILE",
+                              self.tmp / "settings.json"),
+            mock.patch.object(settings, "CUSTOM_PARAMS_FILE",
+                              self.tmp / "custom_params.json"),
+            mock.patch.object(settings, "LOG_DIR", self.tmp / "logs"),
+        ]
+        for patch in self._patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        settings._MEMORY_API_KEYS.clear()
+        self.addCleanup(settings._MEMORY_API_KEYS.clear)
+
+        self.keyring_store = {}
+        self._keyring_patches = [
+            mock.patch.object(settings, "keyring",
+                              _fake_keyring(self.keyring_store)),
+            mock.patch.object(settings, "keyring_available",
+                              return_value=True),
+        ]
+        for patch in self._keyring_patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _write_settings(self, data):
+        with open(settings.SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def test_legacy_single_config_becomes_default_profile(self):
+        # 旧版 settings.json 只有顶层 api_base / model，读出来应自动成为
+        # 一套「默认配置」，顶层字段与当前方案保持一致（旧代码无需修改）
+        self._write_settings({
+            "api_base": "https://old.example/v1",
+            "model": "old-model",
+            "parallel": 5,
+        })
+        data = settings.load_settings()
+        self.assertEqual(len(data["api_profiles"]), 1)
+        profile = data["api_profiles"][0]
+        self.assertEqual(profile["id"], settings.DEFAULT_PROFILE_ID)
+        self.assertEqual(profile["name"], settings.DEFAULT_PROFILE_NAME)
+        self.assertEqual(profile["api_base"], "https://old.example/v1")
+        self.assertEqual(profile["model"], "old-model")
+        self.assertEqual(data["active_api_profile"],
+                         settings.DEFAULT_PROFILE_ID)
+        self.assertEqual(data["api_base"], "https://old.example/v1")
+        self.assertEqual(data["model"], "old-model")
+        self.assertEqual(data["parallel"], 5)
+
+    def test_ensure_migrates_legacy_key_and_persists_profiles(self):
+        # 启动迁移：旧配置写盘为方案，旧钥匙串条目迁移到默认方案并被清理
+        self._write_settings({
+            "api_base": "https://old.example/v1", "model": "old-model"})
+        self.keyring_store[settings.KEYRING_USER] = "sk-legacy"
+
+        self.assertTrue(settings.ensure_api_profiles())
+
+        with open(settings.SETTINGS_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["active_api_profile"],
+                         settings.DEFAULT_PROFILE_ID)
+        self.assertEqual(saved["api_profiles"][0]["id"],
+                         settings.DEFAULT_PROFILE_ID)
+        self.assertEqual(self.keyring_store.get("api_key:default"),
+                         "sk-legacy")
+        self.assertNotIn(settings.KEYRING_USER, self.keyring_store)
+        self.assertEqual(settings.get_api_key(), "sk-legacy")
+
+        # 幂等：再次迁移不写盘、不再改动钥匙串
+        self.assertFalse(settings.ensure_api_profiles())
+        self.assertEqual(self.keyring_store.get("api_key:default"),
+                         "sk-legacy")
+
+    def test_legacy_key_readable_before_migration(self):
+        # 还没迁移时，单一默认方案仍能读到旧钥匙串条目
+        self.keyring_store[settings.KEYRING_USER] = "sk-legacy"
+        self.assertEqual(settings.get_api_key(), "sk-legacy")
+        self.assertFalse(settings.SETTINGS_FILE.exists())
+
+    def test_adding_second_profile_migrates_legacy_key(self):
+        # 首次新增第二套方案前，旧 Key 必须先落到默认方案，
+        # 否则「单一方案回退」失效会让旧 Key 看起来丢失
+        self.keyring_store[settings.KEYRING_USER] = "sk-legacy"
+        profile = settings.save_api_profile("备用", "https://b/v1", "model-b")
+        self.assertNotEqual(profile["id"], settings.DEFAULT_PROFILE_ID)
+        self.assertEqual(self.keyring_store.get("api_key:default"),
+                         "sk-legacy")
+        self.assertEqual(settings.get_api_key(settings.DEFAULT_PROFILE_ID),
+                         "sk-legacy")
+        self.assertEqual(settings.get_api_key(profile["id"]), "")
+
+    def test_multiple_profiles_keep_separate_models_and_keys(self):
+        p1 = settings.save_api_profile(
+            "官方", "https://a.example/v1", "model-a",
+            profile_id=settings.DEFAULT_PROFILE_ID)
+        p2 = settings.save_api_profile(
+            "备用", "https://b.example/v1", "model-b")
+        self.assertNotEqual(p1["id"], p2["id"])
+        self.assertTrue(settings.set_api_key("key-a", p1["id"]))
+        self.assertTrue(settings.set_api_key("key-b", p2["id"]))
+
+        self.assertEqual(len(settings.list_api_profiles()), 2)
+        # save_api_profile 总把保存的方案设为当前
+        self.assertEqual(settings.get_active_profile_id(), p2["id"])
+        self.assertEqual(settings.get_api_key(), "key-b")
+
+        # 切换后顶层 api_base / model 跟随当前方案（旧代码直接读这两个字段）
+        self.assertTrue(settings.set_active_api_profile(p1["id"]))
+        data = settings.load_settings()
+        self.assertEqual(data["api_base"], "https://a.example/v1")
+        self.assertEqual(data["model"], "model-a")
+        self.assertEqual(settings.get_api_key(), "key-a")
+        self.assertEqual(settings.get_api_key(p2["id"]), "key-b")
+
+        # 不存在的方案不能切换
+        self.assertFalse(settings.set_active_api_profile("missing"))
+
+    def test_profile_name_validation(self):
+        settings.save_api_profile(
+            "Official", "https://a.example/v1", "model-a",
+            profile_id=settings.DEFAULT_PROFILE_ID)
+        p2 = settings.save_api_profile(
+            "备用", "https://b.example/v1", "model-b")
+
+        with self.assertRaises(ValueError):
+            settings.save_api_profile("   ", "https://x/v1", "m")
+        with self.assertRaises(ValueError):
+            settings.save_api_profile("备用", "https://x/v1", "m")
+        with self.assertRaises(ValueError):
+            # 名称重复不区分大小写
+            settings.save_api_profile("official", "https://x/v1", "m")
+        with self.assertRaises(ValueError):
+            settings.rename_api_profile(p2["id"], "OFFICIAL")
+        with self.assertRaises(ValueError):
+            settings.save_api_profile("X", "https://x/v1", "m",
+                                      profile_id="missing")
+        with self.assertRaises(ValueError):
+            settings.rename_api_profile(p2["id"], "  ")
+
+        renamed = settings.rename_api_profile(p2["id"], "第二套")
+        self.assertEqual(renamed["name"], "第二套")
+        self.assertEqual(settings.get_api_profile(p2["id"])["name"], "第二套")
+
+    def test_delete_profile_removes_key_and_reassigns_active(self):
+        p1 = settings.save_api_profile(
+            "官方", "https://a.example/v1", "model-a",
+            profile_id=settings.DEFAULT_PROFILE_ID)
+        p2 = settings.save_api_profile(
+            "备用", "https://b.example/v1", "model-b")
+        settings.set_api_key("key-a", p1["id"])
+        settings.set_api_key("key-b", p2["id"])
+        settings.set_active_api_profile(p1["id"])
+
+        self.assertTrue(settings.delete_api_profile(p1["id"]))
+        self.assertIsNone(settings.get_api_profile(p1["id"]))
+        self.assertNotIn("api_key:default", self.keyring_store)
+        self.assertIn(f"api_key:{p2['id']}", self.keyring_store)
+        self.assertEqual(settings.get_active_profile_id(), p2["id"])
+        self.assertEqual(settings.get_active_profile()["name"], "备用")
+
+        # 至少保留一套方案，最后一套不允许删除
+        self.assertFalse(settings.delete_api_profile(p2["id"]))
+        self.assertEqual(len(settings.list_api_profiles()), 1)
+
+    def test_memory_storage_when_keyring_unavailable(self):
+        with mock.patch.object(settings, "keyring_available",
+                               return_value=False):
+            p1 = settings.save_api_profile(
+                "官方", "https://a.example/v1", "model-a",
+                profile_id=settings.DEFAULT_PROFILE_ID)
+            p2 = settings.save_api_profile(
+                "备用", "https://b.example/v1", "model-b")
+            self.assertFalse(settings.set_api_key("mem-a", p1["id"]))
+            self.assertFalse(settings.set_api_key("mem-b", p2["id"]))
+            self.assertEqual(settings.get_api_key(p1["id"]), "mem-a")
+            self.assertEqual(settings.get_api_key(p2["id"]), "mem-b")
+            self.assertNotIn(f"api_key:{p1['id']}", self.keyring_store)
+            self.assertFalse(settings.delete_api_key(p1["id"]))
+            self.assertEqual(settings.get_api_key(p1["id"]), "")
+
+    def test_normalize_repairs_bad_profile_data(self):
+        # 手工编辑坏掉的 settings.json：重复 / 空 id、同名、非法 active
+        # 都应在读取时被自动修复，不能让 UI 出现无法区分的方案
+        self._write_settings({
+            "api_profiles": [
+                {"id": "dup", "name": "Same",
+                 "api_base": "https://a.example/v1", "model": "m"},
+                {"id": "dup", "name": "same",
+                 "api_base": " https://b.example/v1 ", "model": "m2"},
+                {"id": "", "name": "", "api_base": None, "model": None},
+            ],
+            "active_api_profile": "missing",
+        })
+        data = settings.load_settings()
+        profiles = data["api_profiles"]
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(len({p["id"] for p in profiles}), 3)
+        self.assertEqual(len({p["name"].casefold() for p in profiles}), 3)
+        self.assertEqual(profiles[1]["api_base"], "https://b.example/v1")
+        self.assertEqual(data["active_api_profile"], profiles[0]["id"])
+
+    def test_keyring_read_failure_falls_back_to_memory(self):
+        # 钥匙串瞬时读取失败时，本次会话写入内存的 Key 仍应可用
+        settings.save_api_profile(
+            "官方", "https://a.example/v1", "model-a",
+            profile_id=settings.DEFAULT_PROFILE_ID)
+        settings._MEMORY_API_KEYS[settings.DEFAULT_PROFILE_ID] = "mem-key"
+        with mock.patch.object(settings.keyring, "get_password",
+                               side_effect=RuntimeError("boom")):
+            self.assertEqual(settings.get_api_key(), "mem-key")
+
+    def test_keyring_write_failure_key_still_usable_in_session(self):
+        # 钥匙串写失败时 set_api_key 返回 False，但 Key 本次会话应可用
+        settings.save_api_profile(
+            "官方", "https://a.example/v1", "model-a",
+            profile_id=settings.DEFAULT_PROFILE_ID)
+        with mock.patch.object(settings.keyring, "set_password",
+                               side_effect=RuntimeError("boom")):
+            self.assertFalse(
+                settings.set_api_key("mem-key", settings.DEFAULT_PROFILE_ID))
+        self.assertEqual(settings.get_api_key(), "mem-key")
+
+    def test_save_settings_keeps_profiles(self):
+        profile = settings.save_api_profile("官方", "https://a/v1", "model-a")
+        profile_ids = [p["id"] for p in settings.list_api_profiles()]
+
+        data = settings.load_settings()
+        data["parallel"] = 7
+        settings.save_settings(data)
+
+        reloaded = settings.load_settings()
+        self.assertEqual(reloaded["parallel"], 7)
+        self.assertEqual([p["id"] for p in reloaded["api_profiles"]],
+                         profile_ids)
+        self.assertEqual(reloaded["active_api_profile"], profile["id"])
 
 
 if __name__ == "__main__":

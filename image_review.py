@@ -11,6 +11,7 @@
 """
 import base64
 import json
+import logging
 import math
 import os
 import threading
@@ -32,6 +33,9 @@ from PyQt6.QtCore import (
 )
 
 from llm_handler import LLMClient, load_image_base64_from_raw
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------
@@ -94,10 +98,14 @@ class PreviewLoadTask(QRunnable):
             b64 = load_image_base64_from_raw(self.path, thumb_size=self.size)
             img = QImage()
             if img.loadFromData(base64.b64decode(b64), "JPEG"):
+                logger.info("评价页预览加载成功: %s（%dx%d）",
+                            self.path, img.width(), img.height())
                 self.signals.loaded.emit(self.path, img)
             else:
+                logger.warning("评价页预览解码失败: %s", self.path)
                 self.signals.failed.emit(self.path)
-        except Exception:
+        except Exception as e:
+            logger.warning("评价页预览加载异常 %s: %s", self.path, e)
             self.signals.failed.emit(self.path)
 
 
@@ -173,14 +181,20 @@ class ReviewThread(QThread):
             user_prompt = "请评价这张照片。"
             if self.description:
                 user_prompt += f"\n拍摄者的描述：{self.description}"
+            logger.info("开始调用 LLM 评价: %s（描述 %d 字符）",
+                        self.image_path, len(self.description or ""))
             result = self.llm_client.request_json(
                 REVIEW_SYSTEM_PROMPT, user_prompt, self.image_path,
                 max_tokens=4096, 
                 stop_event=self.stop_event)
+            logger.info("LLM 评价返回: %s", json.dumps(
+                result, ensure_ascii=False)[:500])
             self.result.emit(result)
         except InterruptedError:
+            logger.info("评价请求被用户取消: %s", self.image_path)
             self.cancelled.emit()
         except Exception as e:
+            logger.exception("评价请求失败: %s", self.image_path)
             self.error.emit(str(e))
 
 
@@ -302,6 +316,8 @@ class ImageReviewWidget(QWidget):
 
         self.init_ui()
         self.refresh_history_list()
+        logger.info("评价页初始化完成：历史记录 %d 条，历史文件 %s",
+                    len(self.history), self.HISTORY_FILE)
 
     # ---------------- UI ----------------
     def init_ui(self):
@@ -444,15 +460,19 @@ class ImageReviewWidget(QWidget):
         files, _ = QFileDialog.getOpenFileNames(
             self, "选择图片", "", IMAGE_FILTER)
         if not files:
+            logger.info("用户取消选择评价图片")
             return
         self.current_image = files[0]
         self.image_path_edit.setText(files[0])
         self._load_preview(files[0])
         self.status_label.setText("已选择图片，点击「提交评价」")
+        logger.info("评价页已选择图片: %s（本次共选择 %d 张，取第一张）",
+                    files[0], len(files))
 
     def _load_preview(self, path):
         self._preview_current = path
         self.preview.set_loading()
+        logger.info("加载评价页预览: %s", path)
         task = PreviewLoadTask(path)
         task.signals.loaded.connect(self._on_preview_loaded)
         task.signals.failed.connect(self._on_preview_failed)
@@ -461,6 +481,7 @@ class ImageReviewWidget(QWidget):
     def _on_preview_loaded(self, path, image):
         if path != self._preview_current:
             return
+        logger.info("评价页预览显示: %s", path)
         self.preview.set_pixmap(QPixmap.fromImage(image))
 
     def _on_preview_failed(self, path):
@@ -468,23 +489,29 @@ class ImageReviewWidget(QWidget):
             return
         self.preview.clear()
         self.status_label.setText("图片加载失败（可能已移动或损坏）")
+        logger.error("评价页预览失败: %s", path)
 
     # ---------------- 提交 / 取消 ----------------
     def submit(self):
         if not self.current_image:
             QMessageBox.information(self, "提示", "请先选择图片。")
+            logger.warning("提交评价被拒绝：未选择图片")
             return
         if self.review_thread is not None and self.review_thread.isRunning():
+            logger.warning("已有评价请求在进行中，忽略重复提交")
             return
         client = self.get_llm_client()
         if client is None:
             QMessageBox.information(
                 self, "提示", "请先在设置界面配置 API Key 和模型。")
+            logger.warning("提交评价被拒绝：未配置 API Key")
             return
 
         # 快照当前输入，防止提交后用户改动污染结果
         self._pending_image = self.current_image
         self._pending_desc = self.desc_edit.text().strip()
+        logger.info("提交照片评价: %s（模型 %s，描述 %d 字符）",
+                    self._pending_image, client.model, len(self._pending_desc))
 
         self.stop_event.clear()
         self.btn_submit.setEnabled(False)
@@ -505,10 +532,12 @@ class ImageReviewWidget(QWidget):
 
     def cancel_review(self):
         if self.review_thread is None or not self.review_thread.isRunning():
+            logger.warning("当前没有进行中的评价请求，忽略取消")
             return
         self.stop_event.set()
         self.status_label.setText("正在取消...")
         self.btn_cancel.setEnabled(False)
+        logger.info("用户请求取消评价: %s", self._pending_image)
 
     def _on_thread_finished(self):
         """QThread 生命周期清理：完成后释放引用。"""
@@ -550,17 +579,22 @@ class ImageReviewWidget(QWidget):
         self.refresh_history_list()
         self.history_list.setCurrentRow(0)
         self.status_label.setText(f"评价完成 · {ts}")
+        logger.info("评价完成并写入历史：%s，得分 %s，历史共 %d 条",
+                    Path(self._pending_image).name,
+                    {k: v for k, v in scores.items()}, len(self.history))
 
     def on_review_error(self, msg):
         self._restore_buttons()
         self.summary_edit.setPlainText(f"评价失败: {msg}")
         self.status_label.setText("评价失败")
+        logger.error("评价失败: %s（%s）", self._pending_image, msg)
         QMessageBox.warning(self, "评价失败", msg)
 
     def on_review_cancelled(self):
         self._restore_buttons()
         self.summary_edit.setPlainText("已取消")
         self.status_label.setText("已取消")
+        logger.info("评价已取消: %s", self._pending_image)
 
     # ---------------- 历史记录 ----------------
     def refresh_history_list(self):
@@ -586,6 +620,8 @@ class ImageReviewWidget(QWidget):
         if row < 0 or row >= len(self.history):
             return
         entry = self.history[row]
+        logger.info("查看历史记录第 %d 条: %s（%s）", row,
+                    entry.get("timestamp", ""), entry.get("image_path", ""))
         self.radar.set_scores(entry.get("scores", {}))
         self.summary_edit.setPlainText(entry.get("summary", ""))
         suggestions = entry.get("suggestions", [])
@@ -618,9 +654,12 @@ class ImageReviewWidget(QWidget):
             del self.history[row]
         self._save_history()
         self.refresh_history_list()
+        logger.info("已删除 %d 条历史记录，剩余 %d 条",
+                    len(rows), len(self.history))
 
     def clear_history(self):
         if not self.history:
+            logger.info("历史记录为空，忽略清空操作")
             return
         if QMessageBox.question(
                 self, "确认", "确定清空所有历史记录？"
@@ -632,6 +671,9 @@ class ImageReviewWidget(QWidget):
             self.summary_edit.clear()
             self.suggestions_edit.clear()
             self.status_label.setText("历史记录已清空")
+            logger.info("已清空全部历史记录")
+        else:
+            logger.info("用户取消清空历史记录")
 
     # ---------------- 导出 ----------------
     def export_selected(self):
@@ -639,6 +681,7 @@ class ImageReviewWidget(QWidget):
                        for item in self.history_list.selectedItems()})
         if not rows:
             QMessageBox.information(self, "提示", "请先选中要导出的历史记录。")
+            logger.warning("导出被拒绝：未选中历史记录")
             return
         entries = [self.history[r] for r in rows]
 
@@ -648,15 +691,18 @@ class ImageReviewWidget(QWidget):
             self, "导出 Markdown 报告", default_name,
             "Markdown 文件 (*.md);;所有文件 (*)")
         if not out_path:
+            logger.info("用户取消导出 Markdown 报告")
             return
 
         try:
             self._write_markdown(entries, out_path)
         except Exception as e:
+            logger.exception("导出 Markdown 报告失败 %s: %s", out_path, e)
             QMessageBox.warning(self, "导出失败", str(e))
             return
 
         self.status_label.setText(f"已导出 {len(entries)} 条记录到 {out_path}")
+        logger.info("已导出 %d 条历史记录到 %s", len(entries), out_path)
         QMessageBox.information(self, "导出成功",
                                 f"已导出 {len(entries)} 条记录。")
 
@@ -714,23 +760,32 @@ class ImageReviewWidget(QWidget):
 
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
+        logger.info("Markdown 报告已生成: %s（%d 条记录，%d 字符）",
+                    out_path, len(entries), len("\n".join(lines)))
 
     # ---------------- 持久化 ----------------
     def _load_history(self):
         if not os.path.exists(self.HISTORY_FILE):
+            logger.info("历史记录文件不存在，使用空历史: %s", self.HISTORY_FILE)
             return []
         try:
             with open(self.HISTORY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
+                logger.info("已读取历史记录 %d 条: %s",
+                            len(data), self.HISTORY_FILE)
                 return data
-        except Exception:
-            pass
+            logger.warning("历史记录文件格式不是数组，已忽略: %s",
+                           self.HISTORY_FILE)
+        except Exception as e:
+            logger.error("读取历史记录失败 %s: %s", self.HISTORY_FILE, e)
         return []
 
     def _save_history(self):
         try:
             with open(self.HISTORY_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.history, f, ensure_ascii=False, indent=2)
+            logger.info("已保存历史记录 %d 条到 %s",
+                        len(self.history), self.HISTORY_FILE)
         except Exception as e:
-            print(f"保存历史失败: {e}")
+            logger.error("保存历史记录失败 %s: %s", self.HISTORY_FILE, e)

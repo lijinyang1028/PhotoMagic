@@ -18,6 +18,9 @@
 变体（photos 为字典、缺少 style、直接返回数组等）做了兼容。
 """
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 单次请求包含过多图片时，token 成本与超时风险都会上升
 GROUP_SOFT_LIMIT = 8
@@ -59,6 +62,8 @@ def assign_group(groups: dict, paths, name: str) -> dict:
     for p in targets:
         if p not in members:
             members.append(p)
+    logger.info("把 %d 张照片归入组「%s」，该组现有 %d 张",
+                len(targets), name, len(members))
     return _prune(result)
 
 
@@ -67,6 +72,8 @@ def ungroup(groups: dict, paths) -> dict:
     targets = set(paths or [])
     result = {k: [p for p in v if p not in targets]
               for k, v in (groups or {}).items()}
+    logger.info("从分组中移除 %d 张照片，剩余 %d 个组",
+                len(targets), len(_prune(result)))
     return _prune(result)
 
 
@@ -101,6 +108,8 @@ def partition_targets(targets, groups: dict, unify_enabled: bool):
     """
     paths = list(targets or [])
     if not unify_enabled:
+        logger.info("批次切分：未启用统一风格，%d 张照片各自单独提交",
+                    len(paths))
         return [(None, [p]) for p in paths]
 
     batches = []
@@ -114,6 +123,9 @@ def partition_targets(targets, groups: dict, unify_enabled: bool):
             index[name] = len(batches)
             batches.append((name, []))
         batches[index[name]][1].append(p)
+    logger.info("批次切分：%d 张照片 -> %d 个批次（组图批次 %d 个）",
+                len(paths), len(batches),
+                sum(1 for name, _ in batches if name is not None))
     return batches
 
 
@@ -182,14 +194,21 @@ def normalize_group_response(raw, paths):
             # 既没有 style 也没有 photos：把整个对象当作统一风格
             if not style:
                 style = dict(raw)
+            logger.info("组图返回解析：无 photos 字段，整对象视为统一风格"
+                        "（%d 个参数）", len(style))
             return style, per_image
     else:
+        logger.warning("组图返回解析失败：返回类型为 %s，已按空结果处理",
+                       type(raw).__name__)
         return style, per_image
 
     if isinstance(items, dict):
         _fill_from_mapping(items, paths, per_image)
     else:
         _fill_from_sequence(items, paths, per_image)
+    logger.info("组图返回解析完成：统一风格 %d 个参数，逐张微调 %d/%d 张",
+                len(style),
+                sum(1 for p in per_image if p), len(per_image))
     return style, per_image
 
 
@@ -271,4 +290,7 @@ def build_group_user_prompt(base_user_prompt: str, paths) -> str:
     if base:
         lines.append("")
         lines.append(f"补充要求：{base}")
-    return "\n".join(lines)
+    prompt = "\n".join(lines)
+    logger.info("已构建组图 user prompt：%d 张照片，%d 字符",
+                len(paths), len(prompt))
+    return prompt

@@ -2,6 +2,7 @@
 import os
 import base64
 import json
+import logging
 import threading
 from pathlib import Path
 
@@ -31,6 +32,9 @@ from rt_processor import (
     autoload_custom_params, clear_custom_params,
 )
 from settings import load_settings, save_settings, get_api_key
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT_HEADER = """你是一个专业的摄影后期处理顾问。请仔细观察我发给你的照片，结合拍摄参数和画面内容，给出最佳的 RawTherapee 后期参数建议。
@@ -104,10 +108,13 @@ class ImageLoadTask(QRunnable):
             b64 = load_image_base64_from_raw(self.file_path, thumb_size=self.thumb_size)
             img = QImage()
             if img.loadFromData(base64.b64decode(b64), "JPEG"):
+                logger.debug("缩略图加载成功: %s", self.file_path)
                 self.signals.loaded.emit(self.file_path, img)
             else:
+                logger.warning("缩略图解码失败: %s", self.file_path)
                 self.signals.failed.emit(self.file_path, "解码失败")
         except Exception as e:
+            logger.warning("缩略图加载异常 %s: %s", self.file_path, e)
             self.signals.failed.emit(self.file_path, str(e))
 
 
@@ -138,11 +145,16 @@ class ProcessTask(QRunnable):
 
     def run(self):
         if self.stop_event.is_set():
+            logger.info("任务已取消（启动前）: %s", self.raw_path)
             self.signals.finished.emit(self.raw_path, False, "已取消")
             return
 
         self.signals.started.emit(self.raw_path)
         self.signals.log.emit(f"正在处理: {os.path.basename(self.raw_path)}")
+        logger.info("开始处理单张: %s（输出目录 %s，格式 %s，位深 %s，"
+                    "AI 强度 %.2f）",
+                    self.raw_path, self.output_dir, self.output_format,
+                    self.bit_depth, self.strength)
         try:
             # 把 stop_event 传进 LLM 层，用户点停止时可中断网络请求
             params = self.llm_client.request_json(
@@ -150,8 +162,11 @@ class ProcessTask(QRunnable):
                 stop_event=self.stop_event)
             self.signals.log.emit(
                 f"  LLM 返回参数: {json.dumps(params, ensure_ascii=False)}")
+            logger.info("LLM 返回 %d 个参数: %s", len(params),
+                        json.dumps(params, ensure_ascii=False))
 
             if self.stop_event.is_set():
+                logger.info("用户中止处理: %s", self.raw_path)
                 self.signals.finished.emit(self.raw_path, False, "已取消")
                 return
 
@@ -166,6 +181,9 @@ class ProcessTask(QRunnable):
             if used_params != params:
                 self.signals.log.emit(
                     f"  护栏/缩放后: {json.dumps(used_params, ensure_ascii=False)}")
+                logger.info("护栏/强度缩放后参数变化: %s -> %s",
+                            json.dumps(params, ensure_ascii=False),
+                            json.dumps(used_params, ensure_ascii=False))
 
             run_rawtherapee(
                 self.raw_path, pp3_path, self.output_dir,
@@ -175,12 +193,15 @@ class ProcessTask(QRunnable):
             )
             ext = FORMAT_EXT.get(self.output_format, "jpg")
             self.signals.log.emit(f"  已完成: {stem}.{ext}")
+            logger.info("处理完成: %s -> %s.%s", self.raw_path, stem, ext)
             self.signals.finished.emit(self.raw_path, True, "完成")
         except InterruptedError:
             self.signals.log.emit("  已取消（网络请求被中止）")
+            logger.info("处理被用户中止（网络请求中断）: %s", self.raw_path)
             self.signals.finished.emit(self.raw_path, False, "已取消")
         except Exception as e:
             self.signals.log.emit(f"  错误: {str(e)}")
+            logger.exception("处理失败: %s", self.raw_path)
             self.signals.finished.emit(self.raw_path, False, str(e))
 
 
@@ -230,11 +251,13 @@ class GroupProcessTask(QRunnable):
         try:
             self._run()
         except Exception as e:
+            logger.exception("组图任务异常 [%s]: %s", self.group_name, e)
             self.signals.log.emit(f"  组图任务异常: {e}")
             self._finish_all(False, str(e))
 
     def _run(self):
         if self.stop_event.is_set():
+            logger.info("组图任务启动前已取消: %s", self.group_name)
             self._finish_all(False, "已取消")
             return
 
@@ -242,6 +265,10 @@ class GroupProcessTask(QRunnable):
         self.signals.log.emit(
             f"组图 [{self.group_name}] 共 {len(self.raw_paths)} 张，"
             f"一次性提交给 LLM：{names}")
+        logger.info("开始组图任务 [%s]：%d 张（%s），输出目录 %s，格式 %s，"
+                    "AI 强度 %.2f",
+                    self.group_name, len(self.raw_paths), names,
+                    self.output_dir, self.output_format, self.strength)
         for path in self.raw_paths:
             self.signals.started.emit(path)
 
@@ -252,9 +279,11 @@ class GroupProcessTask(QRunnable):
                 max_tokens=4096, stop_event=self.stop_event)
         except InterruptedError:
             self.signals.log.emit("  已取消（网络请求被中止）")
+            logger.info("组图任务被中止 [%s]", self.group_name)
             self._finish_all(False, "已取消")
             return
         except Exception as e:
+            logger.exception("组图请求失败 [%s]: %s", self.group_name, e)
             self.signals.log.emit(f"  组图请求失败: {e}")
             self._finish_all(False, f"组图请求失败: {e}")
             return
@@ -262,11 +291,15 @@ class GroupProcessTask(QRunnable):
         style, per_image = normalize_group_response(raw, self.raw_paths)
         self.signals.log.emit(
             f"  统一风格参数: {json.dumps(style, ensure_ascii=False)}")
+        logger.info("组图 [%s] 统一风格 %d 个参数，逐张微调 %d 处",
+                    self.group_name, len(style),
+                    sum(1 for e in per_image if e))
 
         # ---- 2) 逐张合并风格并输出 ----
         for path, extra in zip(self.raw_paths, per_image):
             name = os.path.basename(path)
             if self.stop_event.is_set():
+                logger.info("组图任务中止，跳过剩余文件: %s", name)
                 self._emit_finished(path, False, "已取消")
                 continue
 
@@ -274,6 +307,9 @@ class GroupProcessTask(QRunnable):
             if extra:
                 self.signals.log.emit(
                     f"  {name} 单张微调: {json.dumps(extra, ensure_ascii=False)}")
+                logger.info("组图 [%s] %s 单张微调: %s",
+                            self.group_name, name,
+                            json.dumps(extra, ensure_ascii=False))
             try:
                 stem = Path(path).stem
                 pp3_path = os.path.join(self.output_dir, f"{stem}.pp3")
@@ -285,6 +321,10 @@ class GroupProcessTask(QRunnable):
                 if used_params != params:
                     self.signals.log.emit(
                         f"  护栏/缩放后: {json.dumps(used_params, ensure_ascii=False)}")
+                    logger.info("组图 [%s] %s 护栏/缩放后参数变化: %s -> %s",
+                                self.group_name, name,
+                                json.dumps(params, ensure_ascii=False),
+                                json.dumps(used_params, ensure_ascii=False))
 
                 run_rawtherapee(
                     path, pp3_path, self.output_dir,
@@ -294,10 +334,14 @@ class GroupProcessTask(QRunnable):
                 )
                 ext = FORMAT_EXT.get(self.output_format, "jpg")
                 self.signals.log.emit(f"  已完成: {stem}.{ext}")
+                logger.info("组图 [%s] 处理完成: %s -> %s.%s",
+                            self.group_name, path, stem, ext)
                 self._emit_finished(path, True, "完成")
             except InterruptedError:
+                logger.info("组图 [%s] 处理被中止: %s", self.group_name, name)
                 self._emit_finished(path, False, "已取消")
             except Exception as e:
+                logger.exception("组图 [%s] 处理失败: %s", self.group_name, name)
                 self.signals.log.emit(f"  {name} 错误: {str(e)}")
                 self._emit_finished(path, False, str(e))
 
@@ -711,6 +755,10 @@ class ProcessingWidget(QWidget):
         self.init_ui()
         self._restore_output_settings()
         self._update_api_status()
+        logger.info("处理页初始化完成：默认输出目录 %s，缩略图线程 4，"
+                    "处理线程 %d，自定义参数 %d 个（错误 %d 个）",
+                    self.default_output, MAX_PARALLEL,
+                    self._custom_loaded, len(self._custom_errors))
 
     # ---------------- UI ----------------
     def init_ui(self):
@@ -982,6 +1030,7 @@ class ProcessingWidget(QWidget):
     # ---------------- API 状态 ----------------
     def reload_api_config(self):
         """设置页保存后由主窗口调用，刷新顶部状态。"""
+        logger.info("收到设置变更，刷新处理页 API 状态")
         self._update_api_status()
 
     def _update_api_status(self):
@@ -993,14 +1042,20 @@ class ProcessingWidget(QWidget):
         if not api_base or not model:
             self.api_status_label.setText(
                 "⚠ 尚未配置 API 接口。请前往「设置」页填写 API Base URL 与 Model。")
+            logger.info("API 状态：未配置接口（api_base=%r，model=%r）",
+                        api_base, model)
         elif not api_key:
             self.api_status_label.setText(
                 f"当前接口：{model} @ {api_base}\n"
                 "⚠ 尚未配置 API Key。请前往「设置」页填写。")
+            logger.info("API 状态：接口已配置（%s @ %s），缺少 API Key",
+                        model, api_base)
         else:
             self.api_status_label.setText(
                 f"当前接口：{model} @ {api_base}\n"
                 "API Key：已配置")
+            logger.info("API 状态：就绪（%s @ %s，API Key 已配置）",
+                        model, api_base)
 
     # ---------------- 输出设置持久化 ----------------
     def _restore_output_settings(self):
@@ -1035,13 +1090,21 @@ class ProcessingWidget(QWidget):
             s["strength"] = self.strength_slider.value()
             s["unify_style"] = self.unify_check.isChecked()
             save_settings(s)
-        except Exception:
-            pass
+            logger.info("已记住输出设置：目录 %s，格式 %s，位深 %s，质量 %d，"
+                        "色彩空间 %s，并发 %d，强度 %d%%，统一风格 %s",
+                        s["output_dir"], s["output_format"], s["bit_depth"],
+                        s["jpeg_quality"], s["color_space"], s["parallel"],
+                        s["strength"], s["unify_style"])
+        except Exception as e:
+            logger.error("保存输出设置失败: %s", e)
 
     def _on_format_changed(self, index):
         is_jpeg = (index == 0)
         self.quality_spin.setEnabled(is_jpeg)
         self.bit_depth_combo.setEnabled(not is_jpeg)
+        logger.info("输出格式切换为 %s（%s）",
+                    FORMAT_MAP.get(index, "jpg"),
+                    "JPEG 质量可调" if is_jpeg else "位深可调")
 
     # ---------------- 参数表管理 ----------------
     def reload_schema(self):
@@ -1059,15 +1122,20 @@ class ProcessingWidget(QWidget):
             self.system_prompt_edit.setPlainText(build_system_prompt())
             self.lbl_reload_hint.setText(
                 f"已重载内置参数，自定义参数保留 {len(custom_snapshot)} 个")
+            logger.info("重载内置参数完成，保留自定义参数 %d 个",
+                        len(custom_snapshot))
         except Exception as e:
+            logger.exception("重载参数表失败: %s", e)
             self.lbl_reload_hint.setText(f"重载失败: {e}")
 
     def import_custom_params(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "选择参数定义 JSON", "", "JSON 文件 (*.json);;所有文件 (*)")
         if not path:
+            logger.info("用户取消导入自定义参数")
             return
 
+        logger.info("用户选择导入自定义参数: %s", path)
         count, errors = load_custom_params(path)
         if count == 0:
             QMessageBox.warning(
@@ -1075,12 +1143,15 @@ class ProcessingWidget(QWidget):
                 "没有有效的参数被导入。\n\n" + "\n".join(errors[:5]))
             self.lbl_reload_hint.setText(
                 f"导入失败：{errors[0] if errors else '未知错误'}")
+            logger.warning("自定义参数导入失败 %s：%s",
+                           path, errors[0] if errors else "未知错误")
             return
 
         try:
             save_custom_params()
         except Exception as e:
             self.lbl_reload_hint.setText(f"导入成功，但持久化失败: {e}")
+            logger.error("自定义参数已导入但持久化失败: %s", e)
         else:
             if errors:
                 self.lbl_reload_hint.setText(
@@ -1088,6 +1159,8 @@ class ProcessingWidget(QWidget):
                     f"首个错误：{errors[0]}）")
             else:
                 self.lbl_reload_hint.setText(f"已导入 {count} 个参数")
+            logger.info("自定义参数导入成功：%d 个（跳过 %d 个）",
+                        count, len(errors))
 
         self.system_prompt_edit.setPlainText(build_system_prompt())
 
@@ -1095,22 +1168,28 @@ class ProcessingWidget(QWidget):
         if QMessageBox.question(
                 self, "确认", "移除所有已导入的自定义参数？"
         ) != QMessageBox.StandardButton.Yes:
+            logger.info("用户取消清空自定义参数")
             return
         clear_custom_params()
         self.system_prompt_edit.setPlainText(build_system_prompt())
         self.lbl_reload_hint.setText("已清空自定义参数")
+        logger.info("已清空所有自定义参数")
 
     def get_llm_client(self):
         """从 settings 读取最新 API 配置；被处理页与评价页共用。"""
         api_key = get_api_key()
         if not api_key:
+            logger.warning("创建 LLM 客户端失败：未配置 API Key")
             return None
         s = load_settings()
-        return LLMClient(
+        client = LLMClient(
             api_base=s.get("api_base", "").strip(),
             api_key=api_key,
             model=s.get("model", "").strip(),
         )
+        logger.info("已按当前设置创建 LLM 客户端（model=%s，api_base=%s）",
+                    client.model, client.api_base)
+        return client
 
     # ---------------- 缩略图懒加载 ----------------
     def _scan_visible(self):
@@ -1133,20 +1212,24 @@ class ProcessingWidget(QWidget):
         self._thumb_loading.discard(file_path)
         self._thumb_cache[file_path] = QPixmap.fromImage(image)
         self.file_list_widget.viewport().update()
+        logger.debug("缩略图已缓存: %s", file_path)
 
     def _on_thumb_failed(self, file_path, err):
         self._thumb_loading.discard(file_path)
         self._thumb_cache[file_path] = QPixmap()
+        logger.warning("缩略图不可用 %s：%s", file_path, err)
 
     # ---------------- 文件列表 ----------------
     def add_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "选择 RAW 文件", "", RAW_FILTER)
         if not files:
+            logger.info("用户取消添加文件")
             return
         existing = {self.file_list_widget.item(i).data(Qt.ItemDataRole.UserRole)
                     for i in range(self.file_list_widget.count())}
         new_files = [f for f in files if f not in existing]
         if not new_files:
+            logger.info("所选 %d 个文件均已在列表中，未新增", len(files))
             return
 
         lw = self.file_list_widget
@@ -1161,6 +1244,10 @@ class ProcessingWidget(QWidget):
             lw.checked_paths.add(f)
         lw.setUpdatesEnabled(True)
         lw.viewport().update()
+        logger.info("已添加 %d 个文件（重复跳过 %d 个），列表共 %d 个文件",
+                    len(new_files), len(files) - len(new_files), lw.count())
+        for f in new_files:
+            logger.info("  新增文件: %s", f)
 
         if lw.currentRow() < 0:
             lw.setCurrentRow(0)
@@ -1169,6 +1256,7 @@ class ProcessingWidget(QWidget):
 
     def _set_all_checks(self, checked):
         if self.processing:
+            logger.warning("处理进行中，忽略全选/全不选操作")
             return
         lw = self.file_list_widget
         lw.checked_paths.clear()
@@ -1177,6 +1265,8 @@ class ProcessingWidget(QWidget):
                 lw.checked_paths.add(lw.item(i).data(Qt.ItemDataRole.UserRole))
         lw.viewport().update()
         self._update_group_hint()
+        logger.info("批量勾选：%s，当前勾选 %d 个",
+                    "全选" if checked else "全不选", len(lw.checked_paths))
 
     # ---------------- 组图管理 ----------------
     def _checked_paths_ordered(self):
@@ -1188,6 +1278,7 @@ class ProcessingWidget(QWidget):
 
     def assign_group_dialog(self):
         if self.processing:
+            logger.warning("处理进行中，忽略分组操作")
             return
         paths = self._checked_paths_ordered()
         if not paths:
@@ -1199,10 +1290,12 @@ class ProcessingWidget(QWidget):
             f"把勾选的 {len(paths)} 张照片归为同一组，组名：",
             text=next_group_name(self.groups))
         if not ok:
+            logger.info("用户取消分组对话框")
             return
         name = name.strip()
         if not name:
             QMessageBox.information(self, "提示", "组名不能为空。")
+            logger.warning("用户提交了空组名，已忽略")
             return
 
         self.groups = assign_group(self.groups, paths, name)
@@ -1210,9 +1303,13 @@ class ProcessingWidget(QWidget):
         self.log_edit.append(
             f"已把 {len(paths)} 张照片设为组「{name}」。"
             f"开启「统一风格」后它们会一次性提交给 LLM。")
+        logger.info("已把 %d 张照片设为组「%s」：%s",
+                    len(paths), name,
+                    ", ".join(os.path.basename(p) for p in paths))
 
     def remove_group(self):
         if self.processing:
+            logger.warning("处理进行中，忽略取消分组操作")
             return
         paths = self._checked_paths_ordered()
         if not paths:
@@ -1221,13 +1318,19 @@ class ProcessingWidget(QWidget):
         self.groups = ungroup(self.groups, paths)
         self._refresh_group_display()
         self.log_edit.append(f"已取消 {len(paths)} 张照片的分组。")
+        logger.info("已取消 %d 张照片的分组，剩余 %d 个组",
+                    len(paths), len(self.groups))
 
     def _refresh_group_display(self):
         lw = self.file_list_widget
         in_list = [lw.item(i).data(Qt.ItemDataRole.UserRole)
                    for i in range(lw.count())]
         # 列表里已不存在的文件不应继续留在分组中
+        before = {k: len(v) for k, v in self.groups.items()}
         self.groups = prune_groups(self.groups, in_list)
+        if before != {k: len(v) for k, v in self.groups.items()}:
+            logger.info("分组随列表变化已修剪：%s -> %s", before,
+                        {k: len(v) for k, v in self.groups.items()})
         for i in range(lw.count()):
             item = lw.item(i)
             path = item.data(Qt.ItemDataRole.UserRole)
@@ -1253,10 +1356,15 @@ class ProcessingWidget(QWidget):
         if any(len(members) > GROUP_SOFT_LIMIT for _, members in big):
             text += f" ⚠ 超过 {GROUP_SOFT_LIMIT} 张建议拆组，避免超时/超 token"
         self.group_hint_label.setText(text)
+        logger.info("组图批次提示：%s（勾选 %d 张，统一风格 %s）",
+                    parts, len(checked),
+                    "开启" if self.unify_check.isChecked() else "关闭")
 
     def clear_files(self):
         if self.processing:
+            logger.warning("处理进行中，忽略清空列表操作")
             return
+        count = self.file_list_widget.count()
         self.file_list_widget.clear()
         self.file_list_widget.checked_paths.clear()
         self._thumb_cache.clear()
@@ -1267,6 +1375,7 @@ class ProcessingWidget(QWidget):
         self.btn_retry.setEnabled(False)
         self.preview_view.clear()
         self._update_group_hint()
+        logger.info("已清空文件列表（清空 %d 个文件、全部分组与缓存）", count)
 
     # ---------------- 预览 / 对比 ----------------
     def update_preview(self, row):
@@ -1280,6 +1389,7 @@ class ProcessingWidget(QWidget):
             return
         self._preview_file = f
         self.preview_view.clear()
+        logger.info("预览切换到第 %d 行: %s", row, f)
 
         task = ImageLoadTask(f, (800, 800))
         task.signals.loaded.connect(self._on_preview_original_loaded)
@@ -1306,8 +1416,10 @@ class ProcessingWidget(QWidget):
                 break
 
         if out_path is None:
+            logger.info("尚无处理结果可预览: %s（输出目录 %s）", stem, out_dir)
             self.preview_view.set_processed(None)
             return
+        logger.info("加载处理结果预览: %s", out_path)
 
         task = ImageLoadTask(out_path, (800, 800))
         task.signals.loaded.connect(self._on_preview_processed_loaded)
@@ -1317,6 +1429,8 @@ class ProcessingWidget(QWidget):
     def _on_preview_original_loaded(self, file_path, image):
         if file_path != self._preview_file:
             return
+        logger.info("原图预览加载完成: %s（%dx%d）",
+                    file_path, image.width(), image.height())
         self.preview_view.set_original(QPixmap.fromImage(image))
 
     def _on_preview_processed_loaded(self, file_path, image):
@@ -1324,10 +1438,12 @@ class ProcessingWidget(QWidget):
             return
         if Path(file_path).stem != Path(self._preview_file).stem:
             return
+        logger.info("处理后预览加载完成: %s（%dx%d）",
+                    file_path, image.width(), image.height())
         self.preview_view.set_processed(QPixmap.fromImage(image))
 
     def _on_preview_failed(self, file_path, err):
-        pass
+        logger.warning("预览加载失败: %s（%s）", file_path, err)
 
     def browse_output(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
@@ -1335,6 +1451,9 @@ class ProcessingWidget(QWidget):
             self.output_dir = d
             self.out_dir_edit.setText(d)
             self._persist_output_settings()
+            logger.info("输出目录已改为: %s", d)
+        else:
+            logger.info("用户取消选择输出目录")
 
     # ---------------- 状态 ----------------
     def _set_item_status(self, file_path, status, color):
@@ -1350,6 +1469,7 @@ class ProcessingWidget(QWidget):
     # ---------------- 处理控制 ----------------
     def start_processing(self):
         if self.processing:
+            logger.warning("已有批处理在进行中，忽略重复启动")
             return
 
         lw = self.file_list_widget
@@ -1362,11 +1482,13 @@ class ProcessingWidget(QWidget):
 
         if not targets:
             QMessageBox.information(self, "提示", "请勾选要处理的文件。")
+            logger.warning("启动批处理被拒绝：未勾选任何文件")
             return
         if not get_api_key():
             QMessageBox.information(
                 self, "提示",
                 "尚未配置 API Key。请前往「设置」页填写。")
+            logger.warning("启动批处理被拒绝：未配置 API Key")
             return
 
         self.output_dir = self.out_dir_edit.text().strip()
@@ -1378,6 +1500,14 @@ class ProcessingWidget(QWidget):
         output_profile = CS_MAP.get(self.color_space_combo.currentIndex(), "RT_sRGB")
         jpeg_quality = self.quality_spin.value()
         strength = self.strength_slider.value() / 100.0
+        logger.info("开始批处理：%d 个文件，输出目录 %s，格式 %s，位深 %s，"
+                    "色彩空间 %s，JPEG 质量 %d，AI 强度 %.2f，并发 %d，"
+                    "统一风格 %s",
+                    len(targets), self.output_dir, output_format, bit_depth,
+                    output_profile, jpeg_quality, strength,
+                    self.parallel_spin.value(), self.unify_check.isChecked())
+        for path in targets:
+            logger.info("  待处理: %s", path)
 
         # 记住本批输出设置
         self._persist_output_settings()
@@ -1414,6 +1544,8 @@ class ProcessingWidget(QWidget):
                 f"其余 {len(targets) - sum(len(m) for _, m in group_batches)} 张按单张处理。")
             for name, members in group_batches:
                 self._set_group_status(members, "组队中", COLOR_PENDING)
+        logger.info("任务切分：共 %d 个批次（组图批次 %d 个）",
+                    len(batches), len(group_batches))
 
         for name, members in batches:
             if name is not None and len(members) > 1:
@@ -1428,6 +1560,7 @@ class ProcessingWidget(QWidget):
                     output_profile=output_profile,
                     strength=strength,
                 )
+                logger.info("提交组图任务「%s」：%d 张", name, len(members))
             else:
                 task = ProcessTask(
                     members[0], self.output_dir, llm_client,
@@ -1438,6 +1571,7 @@ class ProcessingWidget(QWidget):
                     output_profile=output_profile,
                     strength=strength,
                 )
+                logger.info("提交单张任务：%s", members[0])
             task.signals.started.connect(self._on_task_started)
             task.signals.log.connect(self.log_edit.append)
             task.signals.finished.connect(self._on_task_finished)
@@ -1449,13 +1583,17 @@ class ProcessingWidget(QWidget):
 
     def _on_task_started(self, file_path):
         self._set_item_status(file_path, "处理中", COLOR_RUNNING)
+        logger.info("任务进入处理中: %s", file_path)
 
     def stop_processing(self):
         if not self.processing:
+            logger.warning("当前没有进行中的批处理，忽略停止请求")
             return
         self.stop_event.set()
         self.btn_stop.setEnabled(False)
         self.log_edit.append("正在停止...（进行中的任务跑完当前步骤后停下）")
+        logger.info("用户请求停止批处理：已完成 %d/%d",
+                    self.completed_count, self.total_count)
 
     def retry_failed(self):
         if self.processing or not self.failed_paths:
@@ -1463,19 +1601,29 @@ class ProcessingWidget(QWidget):
         lw = self.file_list_widget
         lw.checked_paths = set(self.failed_paths)
         lw.viewport().update()
+        logger.info("重试失败项：%d 个（%s）", len(self.failed_paths),
+                    ", ".join(os.path.basename(p)
+                              for p in list(self.failed_paths)[:20]))
         self.start_processing()
 
     def _on_task_finished(self, file_path, success, message):
         self.completed_count += 1
         if success:
             self._set_item_status(file_path, "完成", COLOR_DONE)
+            logger.info("任务完成 %d/%d: %s",
+                        self.completed_count, self.total_count, file_path)
             if file_path == self._preview_file:
                 self._load_processed_preview(file_path)
         elif message == "已取消":
             self._set_item_status(file_path, "已取消", COLOR_CANCEL)
+            logger.info("任务已取消 %d/%d: %s",
+                        self.completed_count, self.total_count, file_path)
         else:
             self._set_item_status(file_path, "失败", COLOR_FAIL)
             self.failed_paths.add(file_path)
+            logger.error("任务失败 %d/%d: %s（%s）",
+                         self.completed_count, self.total_count,
+                         file_path, message)
 
         self.progress_bar.setValue(
             int(self.completed_count / self.total_count * 100))
@@ -1496,5 +1644,11 @@ class ProcessingWidget(QWidget):
 
         if self.stop_event.is_set():
             self.log_edit.append("处理已停止。")
+            logger.info("批处理已停止：共 %d 个，失败/取消 %d 个",
+                        self.total_count, len(self.failed_paths))
         else:
             self.log_edit.append("全部处理完成！")
+            logger.info("批处理全部完成：共 %d 个，失败 %d 个（%s）",
+                        self.total_count, len(self.failed_paths),
+                        ", ".join(os.path.basename(p)
+                                  for p in list(self.failed_paths)[:20]) or "无")
