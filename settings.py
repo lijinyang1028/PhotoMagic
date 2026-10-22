@@ -59,6 +59,9 @@ DEFAULT_SETTINGS = {
     "parallel": 3,
     "strength": 100,
     "unify_style": False,
+    # 手动指定的 rawtherapee-cli 可执行文件路径；
+    # 为空表示只在系统 PATH 中查找
+    "rawtherapee_cli_path": "",
 }
 
 
@@ -610,6 +613,23 @@ def delete_api_key(profile_id: str = "") -> bool:
     if key_profile_id == DEFAULT_PROFILE_ID:
         _delete_keyring_password(KEYRING_USER, "旧版单配置的")
     return True
+
+
+# ---------------- RawTherapee 路径 ----------------
+def get_rawtherapee_cli_path() -> str:
+    """返回用户手动指定的 rawtherapee-cli 路径；未指定时返回空串。"""
+    return _as_text(load_settings().get("rawtherapee_cli_path"))
+
+
+def set_rawtherapee_cli_path(path: str) -> str:
+    """保存 / 清空手动指定的 rawtherapee-cli 路径（空串表示改用 PATH）。"""
+    path = _as_text(path)
+    data = load_settings()
+    data["rawtherapee_cli_path"] = path
+    save_settings(data)
+    logger.info("已保存 rawtherapee-cli 路径: %s",
+                path or "（清空，改为从 PATH 查找）")
+    return path
 
 
 # ---------------- 自定义参数路径（供 rt_processor 使用） ----------------

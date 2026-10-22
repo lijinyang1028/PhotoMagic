@@ -48,7 +48,7 @@
 
 ## 安装依赖
 
-1. 安装 [RawTherapee 5.9+](https://www.rawtherapee.com/downloads)，确保 `rawtherapee-cli` 已加入系统 PATH（命令行输入 `rawtherapee-cli --version` 能输出版本号）。
+1. 安装 [RawTherapee 5.9+](https://www.rawtherapee.com/downloads)，确保 `rawtherapee-cli` 已加入系统 PATH（命令行输入 `rawtherapee-cli --version` 能输出版本号）。Windows 下的可执行文件名是 `rawtherapee-cli.exe`，Linux/macOS 下是 `rawtherapee-cli`；如果没有加入 PATH，可以稍后在程序「设置」页手动指定它的完整路径。
 2. Python **3.10 及以上**（需要 PyQt6 6.5+ 提供的 `colorSchemeChanged` 信号）。
 3. 克隆项目并安装 Python 依赖：
 
@@ -182,7 +182,7 @@ pytest
 ## 常见问题
 
 **启动时提示未检测到 `rawtherapee-cli`**
-说明 RawTherapee 未安装或未加入 PATH。Windows 下安装完成后需要重启终端；或手动把 RawTherapee 安装目录加入系统环境变量 `Path`。
+说明 RawTherapee 未安装或未加入 PATH。可以在「设置」页的「RawTherapee」区域手动指定可执行文件的完整路径（Windows 如 `C:\Program Files\RawTherapee\rawtherapee-cli.exe`，Linux/macOS 如 `/usr/bin/rawtherapee-cli` 或 `/Applications/RawTherapee.app/Contents/MacOS/rawtherapee-cli`），也可以点「浏览…」用图形界面选择；留空则自动从 PATH 查找。路径支持 `~`、环境变量，以及 Windows 上 Git Bash 的 `/c/...` 写法。或者手动把 RawTherapee 安装目录加入系统环境变量 `Path`，Windows 下安装完成后需要重启终端。
 
 **处理时 LLM 返回的不是有效 JSON**
 程序内置了正则兜底解析（处理 ` ```json ` 围栏、前后夹带说明文字等情况）。如果仍然报错，多为模型本身不支持视觉输入或网络传输被截断，可换 `gpt-4o` 或等价模型测试。

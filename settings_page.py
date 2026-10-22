@@ -1,5 +1,8 @@
-"""设置页面：多套 API 配置方案 / 自定义参数 / 存储信息"""
+"""设置页面：多套 API 配置方案 / RawTherapee 路径 / 自定义参数 / 存储信息"""
 import logging
+import os
+import shutil
+import sys
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -15,10 +18,35 @@ from rt_processor import (
     get_params, get_builtin_param_names,
     load_custom_params, save_custom_params,
     clear_custom_params,
+    normalize_rt_cli_path, rt_cli_file_candidates, is_rt_cli_executable,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+def _rt_cli_name_hint() -> str:
+    """当前系统上 rawtherapee-cli 的可执行文件名。"""
+    return "rawtherapee-cli.exe" if sys.platform.startswith("win") else "rawtherapee-cli"
+
+
+def _rt_cli_example_path() -> str:
+    """按系统给出一个示例路径，用于输入框占位提示。"""
+    if sys.platform.startswith("win"):
+        return r"C:\Program Files\RawTherapee\rawtherapee-cli.exe"
+    if sys.platform == "darwin":
+        return "/Applications/RawTherapee.app/Contents/MacOS/rawtherapee-cli"
+    return "/usr/bin/rawtherapee-cli"
+
+
+def _rt_cli_dialog_filter() -> str:
+    """文件选择框的过滤器（各系统可执行文件命名不同）。"""
+    if sys.platform.startswith("win"):
+        return ("rawtherapee-cli (rawtherapee-cli.exe);;"
+                "可执行文件 (*.exe);;所有文件 (*)")
+    if sys.platform == "darwin":
+        return "rawtherapee-cli (rawtherapee-cli*);;所有文件 (*)"
+    return "rawtherapee-cli (rawtherapee-cli);;所有文件 (*)"
 
 
 def _log_status_text() -> str:
@@ -172,6 +200,40 @@ class SettingsPage(QWidget):
 
         layout.addWidget(llm_group)
 
+        # ---------- RawTherapee ----------
+        rt_group = QGroupBox("RawTherapee")
+        rt_form = QFormLayout(rt_group)
+
+        rt_path_row = QHBoxLayout()
+        self.rt_path_edit = QLineEdit()
+        self.rt_path_edit.setPlaceholderText(
+            "留空则自动从系统 PATH 查找；也可手动指定，例如 "
+            + _rt_cli_example_path())
+        rt_path_row.addWidget(self.rt_path_edit, 1)
+
+        self.btn_browse_rt = QPushButton("浏览…")
+        self.btn_browse_rt.clicked.connect(self.browse_rt_cli)
+        rt_path_row.addWidget(self.btn_browse_rt)
+        rt_form.addRow("rawtherapee-cli 路径:", rt_path_row)
+
+        self.rt_status = QLabel("")
+        self.rt_status.setObjectName("settingsHint")
+        self.rt_status.setWordWrap(True)
+        rt_form.addRow("", self.rt_status)
+
+        rt_btn_row = QHBoxLayout()
+        self.btn_save_rt = QPushButton("保存路径")
+        self.btn_save_rt.clicked.connect(self.save_rt_cli_path)
+        rt_btn_row.addWidget(self.btn_save_rt)
+
+        self.btn_autodetect_rt = QPushButton("自动检测")
+        self.btn_autodetect_rt.clicked.connect(self.autodetect_rt_cli)
+        rt_btn_row.addWidget(self.btn_autodetect_rt)
+        rt_btn_row.addStretch()
+        rt_form.addRow("", rt_btn_row)
+
+        layout.addWidget(rt_group)
+
         # ---------- 自定义参数 ----------
         custom_group = QGroupBox("自定义参数")
         custom_layout = QVBoxLayout(custom_group)
@@ -216,6 +278,118 @@ class SettingsPage(QWidget):
         self._reload_profiles()
         self._refresh_keyring_status()
         self._refresh_custom_status()
+        self.rt_path_edit.setText(
+            normalize_rt_cli_path(settings.get_rawtherapee_cli_path()))
+        self._refresh_rt_status()
+
+    # ---------------- RawTherapee 路径 ----------------
+    def _normalize_rt_cli_path(self, raw: str):
+        """整理用户输入；目录会自动补上可执行文件名。返回 (路径, 错误信息)。"""
+        path = normalize_rt_cli_path(raw)
+        if not path:
+            return "", ""
+        if os.path.isdir(path):
+            for candidate in rt_cli_file_candidates(path):
+                if is_rt_cli_executable(candidate):
+                    return os.path.abspath(candidate), ""
+            message = ("指定的是目录，但目录中没有找到 rawtherapee-cli"
+                       f"（{_rt_cli_name_hint()}）。")
+            if path.rstrip("/\\").endswith(".app"):
+                message += "\n应包含 Contents/MacOS/rawtherapee-cli。"
+            return path, message
+        if not is_rt_cli_executable(path):
+            if os.path.isfile(path):
+                return path, (
+                    "指定的文件不可执行。Linux/macOS 上需要可执行权限，"
+                    "可运行 chmod +x 后重试。")
+            # 兼容 bash 习惯：只输入命令名（如 rawtherapee-cli）时按 PATH 查找
+            if os.sep not in path and "/" not in path:
+                found = shutil.which(path)
+                if found:
+                    return os.path.abspath(found), ""
+            return path, "指定的文件不存在。"
+        return os.path.abspath(path), ""
+
+    def _refresh_rt_status(self):
+        """显示当前生效的 rawtherapee-cli（手动指定优先，其次 PATH）。"""
+        manual = normalize_rt_cli_path(settings.get_rawtherapee_cli_path())
+        active = ""
+        if manual:
+            for candidate in rt_cli_file_candidates(manual):
+                if is_rt_cli_executable(candidate):
+                    active = candidate
+                    break
+        if manual and active:
+            self.rt_status.setText(f"✓ 使用手动指定的路径：{active}")
+        elif manual:
+            self.rt_status.setText(
+                f"⚠ 手动指定的路径不可用：{manual}\n"
+                "程序会自动回退到系统 PATH 查找；请重新选择或点「自动检测」。")
+        else:
+            found = shutil.which("rawtherapee-cli")
+            if found:
+                self.rt_status.setText(f"✓ 已在系统 PATH 中找到：{found}")
+            else:
+                self.rt_status.setText(
+                    "⚠ 未在系统 PATH 中找到 rawtherapee-cli。\n"
+                    f"请点「浏览…」手动指定 {_rt_cli_name_hint()}，"
+                    "或把 RawTherapee 安装目录加入系统 PATH。")
+        logger.info("RawTherapee 状态：手动路径=%s，实际生效=%s",
+                    manual or "未指定", active or "未使用手动路径")
+
+    def browse_rt_cli(self):
+        current = normalize_rt_cli_path(self.rt_path_edit.text())
+        start_dir = os.path.dirname(current) if current else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 rawtherapee-cli 可执行文件", start_dir,
+            _rt_cli_dialog_filter())
+        if not path:
+            logger.info("用户取消选择 rawtherapee-cli 路径")
+            return
+        self.rt_path_edit.setText(path)
+        self.status_label.setText(
+            "已选择 rawtherapee-cli 路径，点「保存路径」后生效。")
+        logger.info("用户选择 rawtherapee-cli 路径: %s", path)
+
+    def autodetect_rt_cli(self):
+        found = shutil.which("rawtherapee-cli")
+        if not found:
+            self.rt_path_edit.clear()
+            self.status_label.setText(
+                "系统 PATH 中未找到 rawtherapee-cli，请手动指定路径。")
+            QMessageBox.information(
+                self, "未找到 rawtherapee-cli",
+                "系统 PATH 中未找到 rawtherapee-cli。\n"
+                f"请点「浏览…」手动指定 {_rt_cli_name_hint()} 的路径。")
+            logger.warning("自动检测 rawtherapee-cli：PATH 中未找到")
+            return
+        self.rt_path_edit.setText(found)
+        self.status_label.setText(
+            f"已自动检测到 rawtherapee-cli：{found}，点「保存路径」后生效。")
+        logger.info("自动检测到 rawtherapee-cli: %s", found)
+
+    def save_rt_cli_path(self):
+        path, error = self._normalize_rt_cli_path(self.rt_path_edit.text())
+        if error:
+            QMessageBox.warning(
+                self, "路径无效",
+                error + f"\n\n请输入 {_rt_cli_name_hint()} 的完整路径，"
+                "或留空让程序自动从 PATH 查找。")
+            logger.warning("保存 rawtherapee-cli 路径失败：%s（%s）", error, path)
+            return
+        try:
+            settings.set_rawtherapee_cli_path(path)
+        except Exception as e:
+            logger.exception("保存 rawtherapee-cli 路径失败: %s", e)
+            QMessageBox.warning(self, "保存失败", f"无法写入配置文件：{e}")
+            return
+        self.rt_path_edit.setText(path)
+        self._refresh_rt_status()
+        if path:
+            self.status_label.setText(f"已保存 rawtherapee-cli 路径：{path}")
+        else:
+            self.status_label.setText(
+                "已清空手动路径，程序会从系统 PATH 查找 rawtherapee-cli。")
 
     # ---------------- 配置方案：加载 / 切换 ----------------
     def _reload_profiles(self, select_id: str = ""):

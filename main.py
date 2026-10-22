@@ -303,7 +303,11 @@ class MainWindow(QMainWindow):
         logger.info("依赖检查 rawtherapee-cli: %s", "已找到" if found else "未找到")
         if not found:
             QMessageBox.warning(self, "依赖缺失",
-                "未检测到 rawtherapee-cli，请安装 RawTherapee 并将其路径添加到环境变量。")
+                "未检测到 rawtherapee-cli。\n\n"
+                "请安装 RawTherapee 并将其加入系统环境变量 PATH；\n"
+                "也可以在「设置」页手动指定 rawtherapee-cli 可执行文件的路径"
+                "（Windows 为 rawtherapee-cli.exe，"
+                "Linux/macOS 为 rawtherapee-cli）。")
 
 
 def main():

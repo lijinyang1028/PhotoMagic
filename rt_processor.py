@@ -3,6 +3,7 @@ RawTherapee 处理模块
 将 JSON 参数转换为 .pp3 文件，并通过命令行调用 rawtherapee-cli
 """
 import os
+import re
 import json
 import logging
 import subprocess
@@ -14,6 +15,9 @@ logger = logging.getLogger(__name__)
 _SCHEMA_PATH = Path(__file__).with_name("params_schema.json")
 CUSTOM_PARAMS_PATH = Path.home() / ".photomagic_custom_params.json"
 _PARAMS_CACHE = None
+
+# rawtherapee-cli 在不同系统上的可执行文件名
+RT_CLI_NAMES = ("rawtherapee-cli", "rawtherapee-cli.exe")
 
 
 # ----------------------------- 参数表加载 -----------------------------
@@ -403,18 +407,121 @@ def generate_pp3(params: dict, output_path: str,
     return params
 
 
+def _manual_rt_cli_path() -> str:
+    """读取用户在设置页手动指定的 rawtherapee-cli 路径（可能为空）。"""
+    try:
+        import settings
+        return settings.get_rawtherapee_cli_path()
+    except Exception as e:  # 配置读取失败不应影响 PATH 查找
+        logger.warning("读取手动指定的 rawtherapee-cli 路径失败: %s", e)
+        return ""
+
+
+def _strip_quotes(value: str) -> str:
+    """去掉首尾空白和成对引号（从 shell 复制路径时常常带引号）。"""
+    value = (value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1].strip()
+    return value
+
+
+def _msys_to_windows_path(path: str) -> str:
+    """在 Windows 上把 Git Bash / MSYS / Cygwin 风格路径转成 Windows 路径。"""
+    if os.name != "nt" or not path:
+        return path
+    match = re.match(r"^/(?:cygdrive/)?([A-Za-z])(?:/(.*))?$", path)
+    if not match:
+        return path
+    drive = match.group(1).upper()
+    rest = (match.group(2) or "").replace("/", "\\")
+    return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
+
+
+def normalize_rt_cli_path(raw: str) -> str:
+    """
+    规范化用户输入的 rawtherapee-cli 路径。
+
+    兼容：
+    - 首尾空白、成对引号（从 bash / PowerShell 复制路径时常见）
+    - ~ 与环境变量（$HOME、${HOME}、%ProgramFiles% 等）
+    - Windows 上 Git Bash / MSYS / Cygwin 的 /c/... 路径
+    """
+    path = _strip_quotes(raw)
+    if not path:
+        return ""
+    path = _msys_to_windows_path(path)
+    path = os.path.expanduser(path)
+    path = os.path.expandvars(path)
+    if os.name == "nt":
+        # 统一成 Windows 分隔符，避免 ~ 展开后出现 C:\Users\me/bin/... 这种混合路径
+        path = path.replace("/", "\\")
+    return path
+
+
+def rt_cli_file_candidates(path: str):
+    """把用户指定的文件或目录展开为可能的 rawtherapee-cli 可执行文件。"""
+    path = normalize_rt_cli_path(path)
+    if not path:
+        return []
+    if not os.path.isdir(path):
+        return [path]
+    candidates = []
+    # macOS 的 .app 包：可执行文件在 Contents/MacOS 下
+    if path.rstrip("/\\").endswith(".app"):
+        candidates.append(os.path.join(
+            path, "Contents", "MacOS", "rawtherapee-cli"))
+    for name in RT_CLI_NAMES:
+        candidates.append(os.path.join(path, name))
+    return candidates
+
+
+def is_rt_cli_executable(path: str) -> bool:
+    """路径是否指向可用的 rawtherapee-cli（POSIX 上检查可执行权限）。"""
+    if not path or not os.path.isfile(path):
+        return False
+    return os.name == "nt" or os.access(path, os.X_OK)
+
+
+def find_rt_cli():
+    """
+    查找 rawtherapee-cli，返回可执行文件路径或 None。
+
+    优先使用设置页手动指定的路径；该路径无效时回退到系统 PATH 查找。
+    手动路径会先展开 ~ / 环境变量，并兼容 Windows 下的 bash 风格路径。
+    """
+    manual = normalize_rt_cli_path(_manual_rt_cli_path())
+    if manual:
+        for candidate in rt_cli_file_candidates(manual):
+            if is_rt_cli_executable(candidate):
+                logger.info("使用手动指定的 rawtherapee-cli: %s", candidate)
+                return candidate
+        logger.warning("手动指定的 rawtherapee-cli 路径不可用: %s，"
+                       "回退到 PATH 查找", manual)
+    found = shutil.which("rawtherapee-cli")
+    logger.info("在 PATH 中查找 rawtherapee-cli: %s", found or "未找到")
+    return found
+
+
+def resolve_rt_cli() -> str:
+    """返回实际要调用的可执行文件名 / 路径（找不到时回退为裸命令名）。"""
+    return find_rt_cli() or "rawtherapee-cli"
+
+
 def run_rawtherapee(input_raw: str, pp3_file: str, output_dir: str,
                     output_format: str = "jpg",
                     jpeg_quality: int = 92,
-                    bit_depth: str = "16"):
+                    bit_depth: str = "16",
+                    rt_cli: str = ""):
     """
     调用 rawtherapee-cli 处理单个 RAW 文件。
     output_format: "jpg" / "tiff" / "png"
     bit_depth: "8" / "16" / "16f" / "32"，仅 tiff/png 有效
+    rt_cli: 可选的 rawtherapee-cli 路径；为空时按设置 / PATH 自动查找
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    cmd = ["rawtherapee-cli", "-o", output_dir, "-p", pp3_file, "-c"]
+    cmd = [rt_cli or resolve_rt_cli(), "-o", output_dir,
+           "-p", pp3_file, "-c"]
 
     if output_format == "jpg":
         cmd.append(f"-j{jpeg_quality}")
@@ -431,9 +538,12 @@ def run_rawtherapee(input_raw: str, pp3_file: str, output_dir: str,
                 " ".join(cmd), output_format, bit_depth, jpeg_quality)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
-    except FileNotFoundError as e:
-        logger.error("未找到 rawtherapee-cli，无法处理 %s: %s", input_raw, e)
-        raise
+    except OSError as e:
+        # FileNotFoundError / PermissionError（Linux/macOS 缺少执行权限）等
+        logger.error("无法执行 rawtherapee-cli（%s），无法处理 %s: %s",
+                     cmd[0], input_raw, e)
+        raise RuntimeError(
+            f"无法执行 rawtherapee-cli（{cmd[0]}）：{e}") from e
     logger.info("rawtherapee-cli 返回码 %d，stdout %d 字符，stderr %d 字符",
                 proc.returncode, len(proc.stdout or ""), len(proc.stderr or ""))
     if proc.returncode != 0:
@@ -445,7 +555,7 @@ def run_rawtherapee(input_raw: str, pp3_file: str, output_dir: str,
 
 
 def check_rt_cli():
-    """检查 rawtherapee-cli 是否可用"""
-    found = shutil.which("rawtherapee-cli")
+    """检查 rawtherapee-cli 是否可用（手动指定优先，其次 PATH）"""
+    found = find_rt_cli()
     logger.info("检查 rawtherapee-cli: %s", found or "未找到")
     return found is not None
