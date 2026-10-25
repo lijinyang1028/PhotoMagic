@@ -2,7 +2,7 @@
 
 利用 LLM 视觉模型分析 RAW 照片，自动生成后期参数，并通过 [RawTherapee](https://www.rawtherapee.com/) 批量输出高质量 JPEG。附带 AI 照片评价、多维度雷达图与前后对比功能。
 
-当前版本：**v0.3.2**
+当前版本：**v0.5.0**
 
 ## 功能
 
@@ -16,6 +16,7 @@
 * 一键重试失败项
 * 开始 / 停止控制，可随时中断批处理
 * **组图统一风格**：把多张照片设为一组，一次性提交给 LLM，得到统一风格 + 逐张微调
+* **原生思考（CoT）**：对支持思考的模型（DeepSeek 系列），可在处理页底部圆角栏里开关「是否先推理再给参数」，展开圆角栏还能直接查看模型返回的思考过程（reasoning_content）；不支持该开关的模型自动按接口默认行为运行
 
 ### 组图（统一风格）
 * 勾选若干照片后点「设为一组」即可成组，列表项上会显示组名徽标
@@ -46,9 +47,15 @@
 * 支持新建 / 重命名 / 删除配置方案，名称不能为空且不能重复
 * 升级自动迁移：旧版单套配置与 API Key 会自动转为「默认配置」方案
 
+### 多版本 RawTherapee
+* 可同时记忆多个不同版本的 RawTherapee（每个版本 = 名称 + `rawtherapee-cli` 路径），例如 5.9 稳定版与 5.10 开发版并存
+* 在「设置」页的「RawTherapee」区域用下拉框随时切换当前使用的版本，「处理」页会立即调用切换后的 `rawtherapee-cli`
+* 支持新建 / 重命名 / 删除版本，名称不能为空且不能重复；可点「检测版本」自动读取版本号填入名称
+* 旧版只保存过一条路径时，启动后会自动迁移为一个「默认版本」
+
 ## 安装依赖
 
-1. 安装 [RawTherapee 5.9+](https://www.rawtherapee.com/downloads)，确保 `rawtherapee-cli` 已加入系统 PATH（命令行输入 `rawtherapee-cli --version` 能输出版本号）。Windows 下的可执行文件名是 `rawtherapee-cli.exe`，Linux/macOS 下是 `rawtherapee-cli`；如果没有加入 PATH，可以稍后在程序「设置」页手动指定它的完整路径。
+1. 安装 [RawTherapee 5.9+](https://www.rawtherapee.com/downloads)，确保 `rawtherapee-cli` 已加入系统 PATH（命令行输入 `rawtherapee-cli --version` 能输出版本号）。Windows 下的可执行文件名是 `rawtherapee-cli.exe`，Linux/macOS 下是 `rawtherapee-cli`；如果没有加入 PATH，可以稍后在程序「设置」页手动指定它的完整路径，并把它保存成一个「RT 版本」（可同时记忆多个不同版本的 RawTherapee）。
 2. Python **3.10 及以上**（需要 PyQt6 6.5+ 提供的 `colorSchemeChanged` 信号）。
 3. 克隆项目并安装 Python 依赖：
 
@@ -81,6 +88,15 @@ pip install -r requirements.txt
 4. 直接在下拉框选择另一套方案即可切换；若当前方案有未保存修改，会先询问「保存 / 不保存 / 取消」
 5. 每套方案的 API Key 独立存储；「清除 API Key」只清除当前方案的 Key
 6. 至少保留一套方案，删除方案时其钥匙串中的 API Key 一并删除
+
+### 管理多个 RawTherapee 版本
+
+1. 打开「设置」页，在「RawTherapee（可记忆多个版本）」区域找到「RT 版本」下拉框
+2. 点「新建」并输入版本名称（例如「5.9 稳定版」）；也可以先点「浏览…」选好 `rawtherapee-cli`，点「检测版本」自动读取版本号作为名称
+3. 填写/确认「rawtherapee-cli 路径」后点「保存当前版本」，该版本即被记忆并设为当前版本
+4. 重复上述步骤添加其它版本；直接在下拉框切换即可更换当前要调用的 RawTherapee
+5. 路径留空表示该版本不指定固定路径，运行时回退到系统 PATH 查找
+6. 若当前版本有未保存修改，切换 / 新建 / 删除前会询问「保存 / 不保存 / 取消」
 
 ### 组图统一风格
 
@@ -160,8 +176,8 @@ raw-llm-rt/
 ├── image_review.py      # 照片评价页面（雷达图 + 历史）
 ├── llm_handler.py       # LLM 调用（单图 / 多图）与 JSON 鲁棒解析
 ├── rt_processor.py      # .pp3 生成与 rawtherapee-cli 调用
-├── settings.py          # 配置读写、多套 API 配置方案、钥匙串、路径（~/.photomagic）
-├── settings_page.py     # 设置页（多套 API 配置、自定义参数）
+├── settings.py          # 配置读写、多套 API 配置方案、多个 RT 版本、钥匙串（~/.photomagic）
+├── settings_page.py     # 设置页（多套 API 配置、多个 RawTherapee 版本、自定义参数）
 ├── log_setup.py         # 日志配置（~/.photomagic/logs，INFO，保留最近 5 次）
 ├── params_schema.json   # 后期参数定义表
 ├── test/
@@ -182,7 +198,7 @@ pytest
 ## 常见问题
 
 **启动时提示未检测到 `rawtherapee-cli`**
-说明 RawTherapee 未安装或未加入 PATH。可以在「设置」页的「RawTherapee」区域手动指定可执行文件的完整路径（Windows 如 `C:\Program Files\RawTherapee\rawtherapee-cli.exe`，Linux/macOS 如 `/usr/bin/rawtherapee-cli` 或 `/Applications/RawTherapee.app/Contents/MacOS/rawtherapee-cli`），也可以点「浏览…」用图形界面选择；留空则自动从 PATH 查找。路径支持 `~`、环境变量，以及 Windows 上 Git Bash 的 `/c/...` 写法。或者手动把 RawTherapee 安装目录加入系统环境变量 `Path`，Windows 下安装完成后需要重启终端。
+说明 RawTherapee 未安装或未加入 PATH。可以在「设置」页的「RawTherapee」区域手动指定可执行文件的完整路径（Windows 如 `C:\Program Files\RawTherapee\rawtherapee-cli.exe`，Linux/macOS 如 `/usr/bin/rawtherapee-cli` 或 `/Applications/RawTherapee.app/Contents/MacOS/rawtherapee-cli`），也可以点「浏览…」用图形界面选择；留空则自动从 PATH 查找。路径支持 `~`、环境变量，以及 Windows 上 Git Bash 的 `/c/...` 写法。同一台机器装了多个版本的 RawTherapee 时，可以把它们分别保存成不同的「RT 版本」，在设置页下拉切换后即可用不同版本处理。或者手动把 RawTherapee 安装目录加入系统环境变量 `Path`，Windows 下安装完成后需要重启终端。
 
 **处理时 LLM 返回的不是有效 JSON**
 程序内置了正则兜底解析（处理 ` ```json ` 围栏、前后夹带说明文字等情况）。如果仍然报错，多为模型本身不支持视觉输入或网络传输被截断，可换 `gpt-4o` 或等价模型测试。

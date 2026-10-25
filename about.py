@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 REPO_URL = "https://github.com/lijinyang1028/photomagic.git"
 DEEPSEEK_URL = "https://platform.deepseek.com/sign_in"
 
-VERSION = "0.3.2"
+VERSION = "0.5.0"
 
 CONTRIBUTORS = [
     {

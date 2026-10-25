@@ -9,16 +9,20 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit,
     QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QMessageBox,
-    QGroupBox, QFormLayout, QProgressBar, QStyledItemDelegate, QStyle,
+    QFormLayout, QProgressBar, QStyledItemDelegate, QStyle,
     QComboBox, QSpinBox, QScrollArea, QFrame, QSlider, QCheckBox, QInputDialog
 )
 
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
+from PyQt6.QtGui import (
+    QPixmap, QImage, QPainter, QPen, QColor, QFont, QTextCursor,
+)
 from PyQt6.QtCore import (
     Qt, QThreadPool, QRunnable, QObject, pyqtSignal, QSize, QRect, QPoint
 )
 
-from llm_handler import LLMClient, load_image_base64_from_raw
+from llm_handler import (
+    LLMClient, load_image_base64_from_raw, supports_native_thinking,
+)
 from grouping import (
     GROUP_SOFT_LIMIT, assign_group, build_group_system_prompt,
     build_group_user_prompt, group_of, merge_group_params, next_group_name,
@@ -42,9 +46,12 @@ SYSTEM_PROMPT_HEADER = """你是一个专业的摄影后期处理顾问。请仔
 【美学约束 · 重要】
 1. 保持通透：优先保留原始对比度与层次感，避免画面发灰、发闷、发蒙。
 2. 慎用压缩类参数：ShadowCompr / HighlightCompr / Shadows / Highlights 容易压平动态范围，除非原片严重欠曝或过曝，否则建议保持在 30 以内。
-3. 联动补偿：如果你确实需要较强的阴影提亮（Shadows > 40）或高光压缩（HighlightCompr > 30），必须同时给出正向的 Contrast（建议 10~25）或 LocalContrast，避免画面平淡。
+3. 联动补偿：如果你确实需要较强的阴影提亮（Shadows > 40）或高光压缩（HighlightCompr > 30），必须同时给出正向的 Contrast（建议 20~45）或 LocalContrast，避免画面平淡。
 4. 保守原则：如果照片曝光与色彩已经准确，请只返回 1~3 个关键参数，甚至直接返回 {}，不要为了"完成任务"强行增加参数。
-5. 优先"还原"而非"风格化"：除非用户明确要求某种风格，请以中性还原为目标。
+5. 优先"还原"而非"风格化"：除非用户明确要求某种风格，请以中性还原为目标。但这不意味着中性灰的风格，你需要将其调整为大众认可的“好看”但不过度艳丽的效果，详见第7条。
+6. 避免对正确曝光的过度追求，当照片本身可以被看作艺术创作时，请以艺术感为优先，而非曝光绝对准确性，一般来说增进画面美感的±0.7EV是可被接受的。
+7. 如果用户无特殊要求，尝试将图片还原为德系风格：即色彩不过度饱和，阴影保留细节，整体偏冷或中性，画面干净通透。
+8. 真正需要被处理的RAW的效果比发送给你的JPEG略微平淡，适当加大相关参数以保证RAW处理后效果。
 
 请严格返回一个 JSON 对象，不要包含任何其他文字。可选键如下（数值，超出范围会被自动钳位）："""
 
@@ -128,7 +135,7 @@ class ProcessTask(QRunnable):
                  system_prompt, user_prompt, stop_event,
                  output_format="jpg", jpeg_quality=92,
                  bit_depth="16", output_profile="RT_sRGB",
-                 strength=1.0):
+                 strength=1.0, max_tokens=1024):
         super().__init__()
         self.raw_path = raw_path
         self.output_dir = output_dir
@@ -141,6 +148,7 @@ class ProcessTask(QRunnable):
         self.bit_depth = bit_depth
         self.output_profile = output_profile
         self.strength = strength
+        self.max_tokens = max_tokens
         self.signals = ProcessTask.Signals()
 
     def run(self):
@@ -159,7 +167,7 @@ class ProcessTask(QRunnable):
             # 把 stop_event 传进 LLM 层，用户点停止时可中断网络请求
             params = self.llm_client.request_json(
                 self.system_prompt, self.user_prompt, self.raw_path,
-                stop_event=self.stop_event)
+                max_tokens=self.max_tokens, stop_event=self.stop_event)
             self.signals.log.emit(
                 f"  LLM 返回参数: {json.dumps(params, ensure_ascii=False)}")
             logger.info("LLM 返回 %d 个参数: %s", len(params),
@@ -218,7 +226,7 @@ class GroupProcessTask(QRunnable):
                  system_prompt, user_prompt, stop_event,
                  output_format="jpg", jpeg_quality=92,
                  bit_depth="16", output_profile="RT_sRGB",
-                 strength=1.0):
+                 strength=1.0, max_tokens=1024):
         super().__init__()
         self.group_name = group_name
         self.raw_paths = list(raw_paths)
@@ -232,6 +240,7 @@ class GroupProcessTask(QRunnable):
         self.bit_depth = bit_depth
         self.output_profile = output_profile
         self.strength = strength
+        self.max_tokens = max_tokens
         self.signals = ProcessTask.Signals()
         self._finished = set()
 
@@ -276,7 +285,7 @@ class GroupProcessTask(QRunnable):
         try:
             raw = self.llm_client.request_json_multi(
                 self.system_prompt, self.user_prompt, self.raw_paths,
-                max_tokens=4096, stop_event=self.stop_event)
+                max_tokens=self.max_tokens, stop_event=self.stop_event)
         except InterruptedError:
             self.signals.log.emit("  已取消（网络请求被中止）")
             logger.info("组图任务被中止 [%s]", self.group_name)
@@ -719,10 +728,66 @@ class FileListWidget(QListWidget):
         self.owner._scan_visible()
 
 
+# ----------------------------- 可折叠大项 -----------------------------
+class CollapsibleSection(QWidget):
+    """
+    处理页的大项容器：标题栏可点击展开 / 收起，默认收起。
+
+    用法：
+        section = CollapsibleSection("1. 选择 RAW 照片", expanded=True)
+        layout = section.content_layout   # 往这里添加原大项的内容
+    """
+
+    def __init__(self, title, expanded=False, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self._expanded = bool(expanded)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        self.header = QPushButton()
+        self.header.setObjectName("sectionHeader")
+        self.header.setCheckable(True)
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.clicked.connect(self._on_header_clicked)
+        root.addWidget(self.header)
+
+        self.content = QWidget()
+        self.content.setObjectName("sectionContent")
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(10, 8, 10, 10)
+        self.content_layout.setSpacing(8)
+        root.addWidget(self.content)
+
+        self.set_expanded(self._expanded)
+
+    def _on_header_clicked(self, checked):
+        self.set_expanded(checked)
+
+    def is_expanded(self):
+        return self._expanded
+
+    def set_expanded(self, expanded):
+        """展开 / 收起，并同步标题栏的箭头与提示。"""
+        self._expanded = bool(expanded)
+        # 用 clicked 而不是 toggled 驱动，这里只需同步按钮状态
+        self.header.blockSignals(True)
+        self.header.setChecked(self._expanded)
+        self.header.blockSignals(False)
+        self.content.setVisible(self._expanded)
+        arrow = "▾" if self._expanded else "▸"
+        self.header.setText(f"{arrow}  {self.title}")
+        self.header.setToolTip("点击收起" if self._expanded else "点击展开")
+
+
 # ----------------------------- 处理页面 -----------------------------
 class ProcessingWidget(QWidget):
     # 请求主窗口跳到设置页
     open_settings_requested = pyqtSignal()
+    # 后台线程把模型原生思考内容送到 UI（跨线程信号自动排队到主线程）
+    cot_received = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -775,7 +840,7 @@ class ProcessingWidget(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.page_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        outer.addWidget(self.page_scroll)
+        outer.addWidget(self.page_scroll, 1)
 
         content = QWidget()
         self.page_scroll.setWidget(content)
@@ -784,8 +849,11 @@ class ProcessingWidget(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        file_group = QGroupBox("1. 选择 RAW 照片")
-        f_layout = QVBoxLayout(file_group)
+        # 各大项都放进可折叠容器；默认只展开第一大项，
+        # 其余折叠，避免一进页面就被大量设置项淹没。
+        self.file_section = CollapsibleSection("1. 选择 RAW 照片",
+                                               expanded=True)
+        f_layout = self.file_section.content_layout
 
         btn_layout = QHBoxLayout()
         self.btn_add = QPushButton("添加文件")
@@ -856,16 +924,33 @@ class ProcessingWidget(QWidget):
         list_preview_layout.addWidget(self.preview_scroll, 1)
 
         f_layout.addLayout(list_preview_layout)
-        layout.addWidget(file_group)
+        layout.addWidget(self.file_section)
 
         # 2. LLM 接口（只读状态 + 前往设置）
-        llm_group = QGroupBox("2. LLM 接口")
-        llm_layout = QVBoxLayout(llm_group)
+        self.llm_section = CollapsibleSection("2. LLM 接口")
+        llm_layout = self.llm_section.content_layout
 
         self.api_status_label = QLabel("")
         self.api_status_label.setObjectName("apiStatus")
         self.api_status_label.setWordWrap(True)
         llm_layout.addWidget(self.api_status_label)
+
+        # Max Tokens：单张与组图请求共用的输出上限，可调并记忆
+        token_row = QHBoxLayout()
+        token_row.setSpacing(8)
+        token_row.addWidget(QLabel("Max Tokens:"))
+        self.max_tokens_spin = QSpinBox()
+        self.max_tokens_spin.setRange(256, 32768)
+        self.max_tokens_spin.setSingleStep(256)
+        self.max_tokens_spin.setValue(1024)
+        self.max_tokens_spin.setToolTip(
+            "单次请求允许模型输出的最大 token 数（单张与组图共用）。\n"
+            "开启原生思考时推理过程会占用额度，正文被截断时可适当调大。")
+        self.max_tokens_spin.valueChanged.connect(
+            self._on_max_tokens_changed)
+        token_row.addWidget(self.max_tokens_spin)
+        token_row.addStretch()
+        llm_layout.addLayout(token_row)
 
         goto_row = QHBoxLayout()
         self.btn_goto_settings = QPushButton("前往设置")
@@ -876,16 +961,17 @@ class ProcessingWidget(QWidget):
         goto_row.addStretch()
         llm_layout.addLayout(goto_row)
 
-        layout.addWidget(llm_group)
+        layout.addWidget(self.llm_section)
 
-        prompt_group = QGroupBox("3. 提示词设置")
-        prompt_layout = QFormLayout(prompt_group)
+        # 提示词设置：User Prompt 移到底部固定发送区，这里只折叠
+        # System Prompt 与自定义参数管理，默认收起。
+        self.prompt_section = CollapsibleSection("3. 提示词设置")
+        prompt_layout = QFormLayout()
+        self.prompt_section.content_layout.addLayout(prompt_layout)
         self.system_prompt_edit = QTextEdit()
         self.system_prompt_edit.setPlainText(build_system_prompt())
         self.system_prompt_edit.setMaximumHeight(160)
         prompt_layout.addRow("System Prompt:", self.system_prompt_edit)
-        self.user_prompt_edit = QLineEdit(DEFAULT_USER_PROMPT)
-        prompt_layout.addRow("User Prompt:", self.user_prompt_edit)
 
         reload_row = QHBoxLayout()
         self.btn_reload_schema = QPushButton("重载内置参数")
@@ -913,10 +999,11 @@ class ProcessingWidget(QWidget):
         self.lbl_reload_hint.setWordWrap(True)
         prompt_layout.addRow("", self.lbl_reload_hint)
 
-        layout.addWidget(prompt_group)
+        layout.addWidget(self.prompt_section)
 
-        out_group = QGroupBox("4. 输出设置")
-        out_form = QFormLayout(out_group)
+        self.out_section = CollapsibleSection("4. 输出设置")
+        out_form = QFormLayout()
+        self.out_section.content_layout.addLayout(out_form)
 
         dir_row = QHBoxLayout()
         self.out_dir_edit = QLineEdit(self.output_dir)
@@ -979,10 +1066,84 @@ class ProcessingWidget(QWidget):
             lambda v: self.strength_label.setText(f"{v}%"))
         out_form.addRow("AI 强度:", strength_row)
 
-        layout.addWidget(out_group)
+        layout.addWidget(self.out_section)
 
         self.format_combo.currentIndexChanged.connect(self._on_format_changed)
         self._on_format_changed(0)
+
+        # 处理日志：同样默认收起
+        self.log_section = CollapsibleSection("处理日志")
+        self.log_edit = QTextEdit()
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setMinimumHeight(140)
+        self.log_section.content_layout.addWidget(self.log_edit)
+        layout.addWidget(self.log_section)
+
+        # ---- 原生思考（CoT）圆角栏：位于底部固定栏上方，可收起 ----
+        think_wrap = QHBoxLayout()
+        think_wrap.setContentsMargins(12, 6, 12, 0)
+        self.thinking_bar = QFrame()
+        self.thinking_bar.setObjectName("thinkingBar")
+        think_box = QVBoxLayout(self.thinking_bar)
+        think_box.setContentsMargins(12, 8, 12, 8)
+        think_box.setSpacing(6)
+
+        think_header = QHBoxLayout()
+        think_header.setSpacing(8)
+        self.think_check = QCheckBox("原生思考（CoT）")
+        self.think_check.setToolTip(
+            "开启后，对支持思考的模型发送 thinking=enabled，\n"
+            "让模型先推理再给答案；关闭则强制非思考模式，更快、更省 token")
+        self.think_check.stateChanged.connect(self._on_thinking_toggled)
+        think_header.addWidget(self.think_check)
+
+        self.think_status_label = QLabel("")
+        self.think_status_label.setObjectName("thinkingHint")
+        think_header.addWidget(self.think_status_label)
+        think_header.addStretch()
+
+        self.btn_think_toggle = QPushButton("▸")
+        self.btn_think_toggle.setObjectName("thinkingToggle")
+        self.btn_think_toggle.setFixedSize(24, 24)
+        self.btn_think_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_think_toggle.setCheckable(True)
+        self.btn_think_toggle.setToolTip("展开思考内容")
+        self.btn_think_toggle.clicked.connect(self._toggle_thinking_detail)
+        think_header.addWidget(self.btn_think_toggle)
+        think_box.addLayout(think_header)
+
+        # 展开区显示模型实际返回的 CoT（reasoning_content），而不是说明文字
+        self.cot_view = QTextEdit()
+        self.cot_view.setObjectName("cotView")
+        self.cot_view.setReadOnly(True)
+        self.cot_view.setMinimumHeight(120)
+        self.cot_view.setMaximumHeight(240)
+        self.cot_view.setPlaceholderText(
+            "这里显示模型最近一次的原生思考过程（reasoning_content）。\n"
+            "开启「原生思考」并开始处理后，展开此栏即可查看。")
+        self.cot_view.setVisible(False)
+        think_box.addWidget(self.cot_view)
+        self.cot_received.connect(self._append_cot)
+
+        think_wrap.addWidget(self.thinking_bar)
+        outer.addLayout(think_wrap)
+
+        # ---- 底部固定操作区（不在滚动区域内，始终可见）----
+        # 默认只露出：第一大项内容 + User Prompt 编辑栏 + 发送按钮
+        action_bar = QWidget()
+        action_bar.setObjectName("actionBar")
+        bar_layout = QVBoxLayout(action_bar)
+        bar_layout.setContentsMargins(12, 8, 12, 10)
+        bar_layout.setSpacing(8)
+
+        prompt_row = QHBoxLayout()
+        prompt_row.setSpacing(8)
+        prompt_row.addWidget(QLabel("User Prompt:"))
+        self.user_prompt_edit = QLineEdit(DEFAULT_USER_PROMPT)
+        self.user_prompt_edit.setPlaceholderText(
+            "告诉 LLM 你想要的风格 / 调整方向，例如：请调成通透的德系风格")
+        prompt_row.addWidget(self.user_prompt_edit, 1)
+        bar_layout.addLayout(prompt_row)
 
         action_layout = QHBoxLayout()
         self.btn_process = CircleIconButton(CircleIconButton.PLAY, "#2563eb")
@@ -1003,14 +1164,8 @@ class ProcessingWidget(QWidget):
 
         self.progress_bar = QProgressBar()
         action_layout.addWidget(self.progress_bar)
-        layout.addLayout(action_layout)
-
-        log_group = QGroupBox("处理日志")
-        log_layout = QVBoxLayout(log_group)
-        self.log_edit = QTextEdit()
-        self.log_edit.setReadOnly(True)
-        log_layout.addWidget(self.log_edit)
-        layout.addWidget(log_group)
+        bar_layout.addLayout(action_layout)
+        outer.addWidget(action_bar)
 
         # 显示自动加载自定义参数的结果
         if self._custom_loaded:
@@ -1056,6 +1211,76 @@ class ProcessingWidget(QWidget):
                 "API Key：已配置")
             logger.info("API 状态：就绪（%s @ %s，API Key 已配置）",
                         model, api_base)
+        # 模型变了，思考开关的可用状态也要跟着刷新
+        self._refresh_thinking_state()
+
+    # ---------------- 原生思考（CoT） ----------------
+    def _refresh_thinking_state(self):
+        """按当前模型刷新思考开关：仅支持的模型可操作，并回显已保存的选择。"""
+        s = load_settings()
+        model = s.get("model", "").strip()
+        supported = supports_native_thinking(model)
+        enabled = bool(s.get("thinking_enabled", True))
+
+        # 回写控件时不能触发保存，否则会把旧值覆盖回去
+        self._thinking_syncing = True
+        self.think_check.setEnabled(supported)
+        self.think_check.setChecked(enabled if supported else False)
+        self._thinking_syncing = False
+
+        if not model:
+            text = "（尚未配置模型）"
+        elif supported:
+            text = f"当前模型 {model}：" + ("开启" if enabled else "关闭")
+        else:
+            text = f"当前模型 {model} 不支持该开关，将按接口默认行为发送"
+        self.think_status_label.setText(text)
+        logger.info("刷新思考开关：model=%s，支持=%s，已保存选择=%s",
+                    model or "（空）", supported, enabled)
+
+    def _on_thinking_toggled(self, _state=None):
+        if getattr(self, "_thinking_syncing", False):
+            return
+        enabled = self.think_check.isChecked()
+        try:
+            s = load_settings()
+            s["thinking_enabled"] = enabled
+            save_settings(s)
+        except Exception as e:
+            logger.error("保存原生思考开关失败: %s", e)
+        logger.info("用户设置原生思考：%s", "开启" if enabled else "关闭")
+        self._refresh_thinking_state()
+
+    def _toggle_thinking_detail(self, checked):
+        self.cot_view.setVisible(checked)
+        self.btn_think_toggle.setText("▾" if checked else "▸")
+        self.btn_think_toggle.setToolTip(
+            "收起思考内容" if checked else "展开思考内容")
+
+    def _append_cot(self, text):
+        """追加模型原生思考内容（主线程槽；由 cot_received 信号触发）。"""
+        text = (text or "").strip()
+        if not text:
+            return
+        if self.cot_view.toPlainText().strip():
+            self.cot_view.append("")
+            self.cot_view.append("─" * 36)
+            self.cot_view.append("")
+        self.cot_view.append(text)
+        self.cot_view.moveCursor(QTextCursor.MoveOperation.End)
+
+        # 长时间批处理可能堆积大量 CoT，只保留最近约 2 万字符
+        doc = self.cot_view.document()
+        limit = 20000
+        if doc.characterCount() > limit:
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.movePosition(
+                QTextCursor.MoveOperation.NextCharacter,
+                QTextCursor.MoveMode.KeepAnchor,
+                doc.characterCount() - limit)
+            cursor.removeSelectedText()
+            logger.info("原生思考内容超过 %d 字符，已截断较早部分", limit)
 
     # ---------------- 输出设置持久化 ----------------
     def _restore_output_settings(self):
@@ -1078,6 +1303,27 @@ class ProcessingWidget(QWidget):
         self.unify_check.setChecked(bool(s.get("unify_style", False)))
         self._update_group_hint()
 
+        # Max Tokens 属于 LLM 接口设置，但同样在启动时从配置恢复
+        self._restoring_settings = True
+        try:
+            self.max_tokens_spin.setValue(
+                max(self.max_tokens_spin.minimum(),
+                    int(s.get("max_tokens", 1024))))
+        finally:
+            self._restoring_settings = False
+
+    def _on_max_tokens_changed(self, value):
+        """max_tokens 改动后立即记忆，下次启动自动恢复。"""
+        if getattr(self, "_restoring_settings", False):
+            return
+        try:
+            s = load_settings()
+            s["max_tokens"] = int(value)
+            save_settings(s)
+            logger.info("已记住 Max Tokens: %d", value)
+        except Exception as e:
+            logger.error("保存 Max Tokens 失败: %s", e)
+
     def _persist_output_settings(self):
         try:
             s = load_settings()
@@ -1089,12 +1335,14 @@ class ProcessingWidget(QWidget):
             s["parallel"] = self.parallel_spin.value()
             s["strength"] = self.strength_slider.value()
             s["unify_style"] = self.unify_check.isChecked()
+            s["max_tokens"] = self.max_tokens_spin.value()
             save_settings(s)
             logger.info("已记住输出设置：目录 %s，格式 %s，位深 %s，质量 %d，"
-                        "色彩空间 %s，并发 %d，强度 %d%%，统一风格 %s",
+                        "色彩空间 %s，并发 %d，强度 %d%%，统一风格 %s，"
+                        "Max Tokens %d",
                         s["output_dir"], s["output_format"], s["bit_depth"],
                         s["jpeg_quality"], s["color_space"], s["parallel"],
-                        s["strength"], s["unify_style"])
+                        s["strength"], s["unify_style"], s["max_tokens"])
         except Exception as e:
             logger.error("保存输出设置失败: %s", e)
 
@@ -1175,8 +1423,13 @@ class ProcessingWidget(QWidget):
         self.lbl_reload_hint.setText("已清空自定义参数")
         logger.info("已清空所有自定义参数")
 
-    def get_llm_client(self):
-        """从 settings 读取最新 API 配置；被处理页与评价页共用。"""
+    def get_llm_client(self, capture_reasoning=False):
+        """
+        从 settings 读取最新 API 配置；被处理页与评价页共用。
+
+        capture_reasoning=True 时，模型返回的原生思考内容会通过
+        cot_received 信号送到处理页的思考栏（评价页不传，避免串台）。
+        """
         api_key = get_api_key()
         if not api_key:
             logger.warning("创建 LLM 客户端失败：未配置 API Key")
@@ -1186,9 +1439,14 @@ class ProcessingWidget(QWidget):
             api_base=s.get("api_base", "").strip(),
             api_key=api_key,
             model=s.get("model", "").strip(),
+            thinking=bool(s.get("thinking_enabled", True)),
+            reasoning_cb=self.cot_received.emit if capture_reasoning else None,
         )
-        logger.info("已按当前设置创建 LLM 客户端（model=%s，api_base=%s）",
-                    client.model, client.api_base)
+        logger.info("已按当前设置创建 LLM 客户端（model=%s，api_base=%s，"
+                    "原生思考=%s，捕获思考内容=%s）",
+                    client.model, client.api_base,
+                    "开启" if client.thinking else "关闭",
+                    "是" if capture_reasoning else "否")
         return client
 
     # ---------------- 缩略图懒加载 ----------------
@@ -1493,19 +1751,21 @@ class ProcessingWidget(QWidget):
 
         self.output_dir = self.out_dir_edit.text().strip()
         os.makedirs(self.output_dir, exist_ok=True)
-        llm_client = self.get_llm_client()
+        llm_client = self.get_llm_client(capture_reasoning=True)
 
         output_format = FORMAT_MAP.get(self.format_combo.currentIndex(), "jpg")
         bit_depth = DEPTH_MAP.get(self.bit_depth_combo.currentIndex(), "16")
         output_profile = CS_MAP.get(self.color_space_combo.currentIndex(), "RT_sRGB")
         jpeg_quality = self.quality_spin.value()
         strength = self.strength_slider.value() / 100.0
+        max_tokens = self.max_tokens_spin.value()
         logger.info("开始批处理：%d 个文件，输出目录 %s，格式 %s，位深 %s，"
                     "色彩空间 %s，JPEG 质量 %d，AI 强度 %.2f，并发 %d，"
-                    "统一风格 %s",
+                    "统一风格 %s，Max Tokens %d",
                     len(targets), self.output_dir, output_format, bit_depth,
                     output_profile, jpeg_quality, strength,
-                    self.parallel_spin.value(), self.unify_check.isChecked())
+                    self.parallel_spin.value(), self.unify_check.isChecked(),
+                    max_tokens)
         for path in targets:
             logger.info("  待处理: %s", path)
 
@@ -1521,6 +1781,8 @@ class ProcessingWidget(QWidget):
         self.failed_paths.clear()
         self.progress_bar.setValue(0)
         self.log_edit.clear()
+        # 新一批处理开始，清掉上一批的原生思考内容，避免混淆
+        self.cot_view.clear()
         self.btn_process.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_retry.setEnabled(False)
@@ -1559,6 +1821,7 @@ class ProcessingWidget(QWidget):
                     bit_depth=bit_depth,
                     output_profile=output_profile,
                     strength=strength,
+                    max_tokens=max_tokens,
                 )
                 logger.info("提交组图任务「%s」：%d 张", name, len(members))
             else:
@@ -1570,6 +1833,7 @@ class ProcessingWidget(QWidget):
                     bit_depth=bit_depth,
                     output_profile=output_profile,
                     strength=strength,
+                    max_tokens=max_tokens,
                 )
                 logger.info("提交单张任务：%s", members[0])
             task.signals.started.connect(self._on_task_started)

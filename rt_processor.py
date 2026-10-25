@@ -482,6 +482,50 @@ def is_rt_cli_executable(path: str) -> bool:
     return os.name == "nt" or os.access(path, os.X_OK)
 
 
+def _resolve_rt_cli_candidate(path: str):
+    """把手动路径 / 命令名解析成实际可执行文件；找不到返回 None。"""
+    manual = normalize_rt_cli_path(path)
+    if not manual:
+        return None
+    for candidate in rt_cli_file_candidates(manual):
+        if is_rt_cli_executable(candidate):
+            return candidate
+    # 兼容 bash 习惯：只输入命令名（如 rawtherapee-cli）时按 PATH 查找
+    if os.sep not in manual and "/" not in manual:
+        return shutil.which(manual)
+    return None
+
+
+def get_rt_cli_version(path: str = "") -> str:
+    """
+    读取 rawtherapee-cli 的版本号，供设置页区分 / 命名多个 RT 版本。
+
+    path 为空时使用设置页当前选中的版本（找不到再用系统 PATH）。
+    返回 "5.9" 这类版本号；读取失败返回空串，不影响正常处理流程。
+    """
+    executable = (_resolve_rt_cli_candidate(path) if path
+                  else find_rt_cli())
+    if not executable:
+        logger.warning("读取 rawtherapee-cli 版本失败：未找到可执行文件")
+        return ""
+    try:
+        proc = subprocess.run([executable, "--version"],
+                              capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("读取 rawtherapee-cli（%s）版本失败: %s",
+                       executable, e)
+        return ""
+    output = "\n".join(part for part in (proc.stdout, proc.stderr)
+                       if part).strip()
+    if not output:
+        logger.warning("rawtherapee-cli（%s）未输出版本信息", executable)
+        return ""
+    match = re.search(r"(\d+\.\d+(?:\.\d+)?)", output)
+    version = match.group(1) if match else output.splitlines()[0].strip()[:40]
+    logger.info("rawtherapee-cli（%s）版本: %s", executable, version)
+    return version
+
+
 def find_rt_cli():
     """
     查找 rawtherapee-cli，返回可执行文件路径或 None。

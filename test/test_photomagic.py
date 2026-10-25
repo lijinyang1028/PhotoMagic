@@ -25,7 +25,10 @@ from unittest import mock
 import llm_handler
 import log_setup
 import settings
-from llm_handler import LLMClient
+from llm_handler import (
+    LLMClient, build_thinking_fields, normalize_model_name,
+    supports_native_thinking,
+)
 from rt_processor import generate_pp3, run_rawtherapee, check_rt_cli, get_params
 from grouping import (
     assign_group, build_group_system_prompt, build_group_user_prompt, group_of,
@@ -128,13 +131,18 @@ class TestRunRawTherapee(unittest.TestCase):
 
 
 class TestCheckRtCli(unittest.TestCase):
+    # 只 mock shutil.which 不够：find_rt_cli 会优先读用户配置里手动指定的
+    # rawtherapee-cli 路径，本机装了 RT 时该路径真实存在，测试就会偶发失败。
+    # 这里同时屏蔽手动路径，让测试只校验 PATH 查找逻辑，不依赖本机环境。
     def test_found(self):
-        with mock.patch("rt_processor.shutil.which",
-                        return_value="/usr/bin/rawtherapee-cli"):
+        with mock.patch("rt_processor._manual_rt_cli_path", return_value=""), \
+                mock.patch("rt_processor.shutil.which",
+                           return_value="/usr/bin/rawtherapee-cli"):
             self.assertTrue(check_rt_cli())
 
     def test_not_found(self):
-        with mock.patch("rt_processor.shutil.which", return_value=None):
+        with mock.patch("rt_processor._manual_rt_cli_path", return_value=""), \
+                mock.patch("rt_processor.shutil.which", return_value=None):
             self.assertFalse(check_rt_cli())
 
 
@@ -148,12 +156,16 @@ class _FakeResp:
     - 增加了 close()（request_json 在 finally 中调用）
     - 内部把返回体预序列化成完整 JSON，再在 iter_content 中按 chunk_size 切片，
       与真实 requests.Response 的行为一致
+    - reasoning：可选，模拟开启原生思考时返回的 reasoning_content
     """
-    def __init__(self, content, status_code=200):
+    def __init__(self, content, status_code=200, reasoning=None):
         self._content = content
         self.status_code = status_code
+        message = {"content": content}
+        if reasoning is not None:
+            message["reasoning_content"] = reasoning
         self._body = json.dumps({
-            "choices": [{"message": {"content": content}}]
+            "choices": [{"message": message}]
         }).encode("utf-8")
 
     def raise_for_status(self):
@@ -171,12 +183,12 @@ class _FakeResp:
         return json.loads(self._body.decode("utf-8"))
 
 
-def parse(content):
+def parse(content, reasoning=None):
     """mock 掉网络请求与图片加载，仅测 request_json 的 JSON 解析。"""
     with mock.patch.object(llm_handler, "requests") as m_req, \
          mock.patch.object(llm_handler, "load_image_base64_from_raw",
                            return_value="AAAA"):
-        m_req.post.return_value = _FakeResp(content)
+        m_req.post.return_value = _FakeResp(content, reasoning=reasoning)
         return LLMClient("http://x", "key", "m").request_json("s", "u", "fake.jpg")
 
 
@@ -200,6 +212,17 @@ class TestRequestJson(unittest.TestCase):
     def test_no_json_raises_value_error(self):
         with self.assertRaises(ValueError):
             parse("抱歉，我无法分析这张照片。")
+
+    def test_reasoning_content_does_not_break_json(self):
+        # 开启原生思考时，推理过程在 reasoning_content，JSON 仍在 content
+        result = parse('{"exposure": 0.5}',
+                       reasoning="先看曝光，再判断对比度……")
+        self.assertEqual(result, {"exposure": 0.5})
+
+    def test_empty_content_raises_value_error(self):
+        # 思考模式把 max_tokens 吃光时 content 可能为空，要给出清晰错误
+        with self.assertRaises(ValueError):
+            parse("", reasoning="想了很多但没给答案")
 
 
 class TestPipeline(unittest.TestCase):
@@ -434,6 +457,118 @@ class TestRequestJsonMulti(unittest.TestCase):
                               if c["type"] == "image_url"]), 1)
         self.assertEqual(result, {"exposure": 0.5})
         self.assertEqual(m_load.call_count, 1)
+
+
+# ============================ 原生思考（CoT） ============================
+class TestNativeThinking(unittest.TestCase):
+    def test_normalize_model_name(self):
+        self.assertEqual(normalize_model_name("  DeepSeek-Flash "),
+                         "deepseek-flash")
+        # openrouter / siliconflow 的 provider/model 写法取最后一段
+        self.assertEqual(normalize_model_name("deepseek/deepseek-chat"),
+                         "deepseek-chat")
+
+    def test_supports_deepseek_models(self):
+        for model in ("deepseek-flash", "deepseek-v4-pro", "DeepSeek-Chat",
+                      "deepseek/deepseek-v4-pro"):
+            self.assertTrue(supports_native_thinking(model), model)
+
+    def test_rejects_non_thinking_models(self):
+        for model in ("gpt-4o", "claude-3-5-sonnet", "openai/gpt-4o",
+                      "gemini-2.0-flash", ""):
+            self.assertFalse(supports_native_thinking(model), model)
+
+    def test_build_fields_enabled(self):
+        self.assertEqual(build_thinking_fields("deepseek-flash", True),
+                         {"thinking": {"type": "enabled"}})
+
+    def test_build_fields_disabled(self):
+        self.assertEqual(build_thinking_fields("deepseek-flash", False),
+                         {"thinking": {"type": "disabled"}})
+
+    def test_build_fields_none_means_no_override(self):
+        # None = 不干预，沿用接口默认行为（不能发空开关）
+        self.assertEqual(build_thinking_fields("deepseek-flash", None), {})
+
+    def test_unsupported_model_never_sends_thinking(self):
+        for flag in (True, False, None):
+            self.assertEqual(build_thinking_fields("gpt-4o", flag), {})
+
+    def test_non_deepseek_model_name_is_not_partially_matched(self):
+        # "deepseek" 只是前缀匹配，不能误伤 "not-deepseek-model"
+        self.assertFalse(supports_native_thinking("not-deepseek-model"))
+
+
+class TestThinkingPayload(unittest.TestCase):
+    """思考开关是否正确进入 chat/completions 请求体。"""
+
+    def _payload(self, model, thinking, content='{"exposure": 1}'):
+        with mock.patch.object(llm_handler, "requests") as m_req, \
+             mock.patch.object(llm_handler, "load_image_base64_from_raw",
+                               return_value="AAAA"):
+            m_req.post.return_value = _FakeResp(content)
+            client = LLMClient("http://x", "key", model, thinking=thinking)
+            client.request_json("s", "u", "fake.jpg")
+            return m_req.post.call_args.kwargs["json"]
+
+    def test_deepseek_thinking_enabled(self):
+        payload = self._payload("deepseek-flash", True)
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+
+    def test_deepseek_thinking_disabled(self):
+        payload = self._payload("deepseek-flash", False)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+    def test_client_without_thinking_sends_no_field(self):
+        payload = self._payload("deepseek-flash", None)
+        self.assertNotIn("thinking", payload)
+
+    def test_unsupported_model_sends_no_field(self):
+        payload = self._payload("gpt-4o", True)
+        self.assertNotIn("thinking", payload)
+
+    def test_request_still_parses_json_when_thinking(self):
+        with mock.patch.object(llm_handler, "requests") as m_req, \
+             mock.patch.object(llm_handler, "load_image_base64_from_raw",
+                               return_value="AAAA"):
+            m_req.post.return_value = _FakeResp(
+                '```json\n{"contrast": 20}\n```', reasoning="推理……")
+            client = LLMClient("http://x", "key", "deepseek-flash",
+                               thinking=True)
+            self.assertEqual(client.request_json("s", "u", "fake.jpg"),
+                             {"contrast": 20})
+
+
+class TestReasoningCallback(unittest.TestCase):
+    """原生思考内容要能送到 UI，且回调异常不能影响处理。"""
+
+    def _call(self, reasoning_cb=None, reasoning="先看曝光，再看对比度"):
+        with mock.patch.object(llm_handler, "requests") as m_req, \
+             mock.patch.object(llm_handler, "load_image_base64_from_raw",
+                               return_value="AAAA"):
+            m_req.post.return_value = _FakeResp('{"exposure": 1}',
+                                                reasoning=reasoning)
+            client = LLMClient("http://x", "key", "deepseek-flash",
+                               thinking=True, reasoning_cb=reasoning_cb)
+            return client.request_json("s", "u", "fake.jpg")
+
+    def test_callback_receives_reasoning_content(self):
+        received = []
+        self._call(reasoning_cb=received.append)
+        self.assertEqual(received, ["先看曝光，再看对比度"])
+
+    def test_callback_exception_does_not_break_parsing(self):
+        def boom(_text):
+            raise RuntimeError("ui 挂了")
+        self.assertEqual(self._call(reasoning_cb=boom), {"exposure": 1})
+
+    def test_no_callback_still_parses(self):
+        self.assertEqual(self._call(), {"exposure": 1})
+
+    def test_callback_not_called_without_reasoning(self):
+        received = []
+        self._call(reasoning_cb=received.append, reasoning=None)
+        self.assertEqual(received, [])
 
 
 class TestGroupPipeline(unittest.TestCase):
@@ -827,6 +962,42 @@ class TestApiProfiles(unittest.TestCase):
         self.assertEqual([p["id"] for p in reloaded["api_profiles"]],
                          profile_ids)
         self.assertEqual(reloaded["active_api_profile"], profile["id"])
+
+
+class TestThinkingSetting(unittest.TestCase):
+    """思考开关的默认值与持久化（不依赖真实 ~/.photomagic）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.gettempdir()) / (
+            f"photomagic_thinking_{os.getpid()}_{uuid.uuid4().hex[:8]}")
+        os.mkdir(self.tmp)
+        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
+        for name, value in (
+                ("CONFIG_DIR", self.tmp),
+                ("SETTINGS_FILE", self.tmp / "settings.json"),
+                ("CUSTOM_PARAMS_FILE", self.tmp / "custom_params.json"),
+                ("LOG_DIR", self.tmp / "logs"),
+        ):
+            patcher = mock.patch.object(settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_default_thinking_is_enabled(self):
+        self.assertTrue(settings.load_settings()["thinking_enabled"])
+
+    def test_saved_thinking_flag_round_trips(self):
+        data = settings.load_settings()
+        data["thinking_enabled"] = False
+        settings.save_settings(data)
+        self.assertFalse(settings.load_settings()["thinking_enabled"])
+
+    def test_old_settings_without_key_defaults_to_enabled(self):
+        # 升级前保存的 settings.json 没有该字段，读取时应补默认值
+        with open(settings.SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"parallel": 5}, f)
+        data = settings.load_settings()
+        self.assertTrue(data["thinking_enabled"])
+        self.assertEqual(data["parallel"], 5)
 
 
 if __name__ == "__main__":

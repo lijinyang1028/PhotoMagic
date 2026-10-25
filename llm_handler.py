@@ -7,13 +7,87 @@ import json
 import logging
 import requests
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ExifTags
 import rawpy
+
+try:
+    import exifread
+    _EXIFREAD_AVAILABLE = True
+except ImportError:
+    exifread = None
+    _EXIFREAD_AVAILABLE = False
 
 
 logger = logging.getLogger(__name__)
 
+if not _EXIFREAD_AVAILABLE:
+    logger.warning(
+        "未安装 exifread，RAW 的 EXIF 可能不完整；"
+        "如需更完整的 RAW EXIF 支持，可运行 pip install exifread")
 
+
+# ----------------------------- 原生思考（CoT） -----------------------------
+# DeepSeek 系列模型支持用 thinking 字段控制「是否先输出推理过程」：
+#   {"thinking": {"type": "enabled"}}  /  {"thinking": {"type": "disabled"}}
+# 其他厂商（OpenAI 等）的接口不一定接受这个字段，因此只对识别出的模型发送，
+# 避免出现 400 Unrecognized request argument。
+THINKING_MODEL_PREFIXES = ("deepseek",)
+
+
+def normalize_model_name(model: str) -> str:
+    """取模型名的最后一段，兼容 openrouter / siliconflow 的 provider/model 写法。"""
+    name = (model or "").strip().lower()
+    return name.rsplit("/", 1)[-1] if "/" in name else name
+
+
+def supports_native_thinking(model: str) -> bool:
+    """当前模型是否支持原生思考开关（目前为 DeepSeek 系模型）。"""
+    name = normalize_model_name(model)
+    return any(name.startswith(prefix) for prefix in THINKING_MODEL_PREFIXES)
+
+
+def build_thinking_fields(model: str, thinking_enabled):
+    """
+    构造控制原生 CoT 的请求字段。
+
+    thinking_enabled:
+      - True  : 开启思考（enabled）
+      - False : 关闭思考（disabled）
+      - None  : 不干预，沿用接口默认行为
+    不支持的模型一律返回 {}，保证不会把非标准参数发给别的接口。
+    """
+    if thinking_enabled is None or not supports_native_thinking(model):
+        return {}
+    return {"thinking": {"type": "enabled" if thinking_enabled else "disabled"}}
+
+
+# Exif SubIFD 的 tag id；Pillow 8.2+ 可以用 ExifTags.IFD.Exif 代替，
+# 这里用数字常量以兼容更老的 Pillow
+_EXIF_SUB_IFD = 0x8769
+
+# 字段映射：显示标签 -> (exifread 字段名候选, PIL 标准名候选)
+# exifread 返回的键形如 "Image Make" / "EXIF FNumber"；
+# PIL 的 ExifTags.TAGS 返回的是 "Make" / "FNumber" 等标准名。
+_EXIF_FIELD_MAP = [
+    ("厂商", ("Image Make",), ("Make",)),
+    ("相机", ("Image Model",), ("Model",)),
+    ("镜头", ("EXIF LensModel", "Image LensModel"), ("LensModel",)),
+    ("光圈", ("EXIF FNumber",), ("FNumber",)),
+    ("快门", ("EXIF ExposureTime",), ("ExposureTime",)),
+    ("ISO", ("EXIF ISOSpeedRatings", "EXIF PhotographicSensitivity"),
+            ("ISOSpeedRatings", "PhotographicSensitivity")),
+    ("焦距", ("EXIF FocalLength",), ("FocalLength",)),
+    ("等效焦距", ("EXIF FocalLengthIn35mmFilm",), ("FocalLengthIn35mmFilm",)),
+    ("曝光补偿", ("EXIF ExposureBiasValue",), ("ExposureBiasValue",)),
+    ("白平衡", ("EXIF WhiteBalance",), ("WhiteBalance",)),
+    ("闪光灯", ("EXIF Flash",), ("Flash",)),
+    ("测光模式", ("EXIF MeteringMode",), ("MeteringMode",)),
+    ("曝光模式", ("EXIF ExposureProgram",), ("ExposureProgram",)),
+    ("拍摄时间", ("EXIF DateTimeOriginal",), ("DateTimeOriginal",)),
+]
+
+
+# ----------------------------- 图片编码 -----------------------------
 def load_image_base64_from_raw(raw_path: str, thumb_size: tuple = (512, 512)) -> str:
     """
     从 RAW 文件提取缩略图/转换后转为 base64 JPEG 字符串
@@ -58,6 +132,183 @@ def load_image_base64_from_raw(raw_path: str, thumb_size: tuple = (512, 512)) ->
     return base64.b64encode(data).decode("utf-8")
 
 
+# ----------------------------- EXIF 读取 -----------------------------
+def _format_exif_value(value) -> str:
+    """把 EXIF 值转成易读字符串。"""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+    if isinstance(value, tuple):
+        parts = [_format_exif_value(v) for v in value if v is not None]
+        return "/".join(p for p in parts if p)
+    # Pillow 的 IFDRational：尽量保留分数 / 小数值
+    try:
+        from PIL.TiffImagePlugin import IFDRational
+        if isinstance(value, IFDRational):
+            if value.denominator == 1:
+                return str(int(value))
+            try:
+                fv = float(value)
+                # 快门类的小数值尽量还原成 "1/x"
+                if 0 < fv < 1:
+                    inv = round(1 / fv)
+                    if inv > 0 and abs(1 / inv - fv) / fv < 0.01:
+                        return f"1/{inv}"
+            except Exception:
+                pass
+            return f"{value.numerator}/{value.denominator}"
+    except ImportError:
+        pass
+    return str(value).strip()
+
+
+def _read_exif_with_exifread(raw_path: str):
+    """用 exifread 读取 EXIF；失败 / 未安装返回 None。"""
+    if not _EXIFREAD_AVAILABLE:
+        return None
+    try:
+        with open(raw_path, "rb") as f:
+            # details=False 跳过 MakerNotes，strict=False 让解析更宽容
+            tags = exifread.process_file(f, details=False, strict=False)
+    except Exception as e:
+        logger.info("exifread 读取 EXIF 失败 %s: %s", raw_path, e)
+        return None
+    return tags or None
+
+
+def _read_exif_with_pil(raw_path: str):
+    """
+    用 PIL 兜底读取 EXIF（对 CR3 等 exifread 不擅长的格式）。
+
+    策略：
+      1) 直接 Image.open(raw_path).getexif()（PIL 能识别的容器，如 DNG）；
+      2) 失败时用 rawpy 提取内嵌 JPEG 缩略图，再读缩略图的 EXIF
+         —— CR3 / CR2 等相机都会在 RAW 里内嵌带完整 EXIF 的 JPEG 预览，
+            这是对 CR3 最稳妥的兜底路径。
+
+    返回 {标准名: 值} dict；完全读取失败时返回 None。
+    """
+    exif = None
+
+    # 策略 1：直接打开（若 PIL 认出该格式）
+    try:
+        with Image.open(raw_path) as img:
+            exif = img.getexif()
+    except Exception:
+        exif = None
+
+    # 策略 2：从 RAW 内嵌 JPEG 缩略图读取
+    if not exif:
+        try:
+            with rawpy.imread(raw_path) as raw:
+                thumb = raw.extract_thumb()
+                if thumb.format == rawpy.ThumbFormat.JPEG:
+                    img = Image.open(BytesIO(thumb.data))
+                    exif = img.getexif()
+        except Exception as e:
+            logger.info("PIL 兜底读取 EXIF 失败 %s: %s", raw_path, e)
+            return None
+
+    if not exif:
+        return None
+
+    result = {}
+    # 顶层 IFD（Make / Model）
+    try:
+        for tag_id, value in exif.items():
+            name = ExifTags.TAGS.get(tag_id)
+            if name and value is not None:
+                result[name] = value
+    except Exception:
+        pass
+    # Exif SubIFD（FNumber / ExposureTime / ISO 等）
+    try:
+        sub_ifd = exif.get_ifd(_EXIF_SUB_IFD)
+        for tag_id, value in sub_ifd.items():
+            name = ExifTags.TAGS.get(tag_id)
+            if name and value is not None:
+                result[name] = value
+    except Exception:
+        pass
+
+    return result or None
+
+
+def _read_exif_tags(raw_path: str):
+    """
+    统一读取 EXIF：优先 exifread，空结果时用 PIL 兜底。
+
+    返回 {字段名: 值}；两个来源都读不到返回 None。
+    """
+    tags = _read_exif_with_exifread(raw_path)
+    if tags:
+        return tags
+    tags = _read_exif_with_pil(raw_path)
+    if tags:
+        logger.info("使用 PIL 兜底读取 EXIF：%s（%d 个字段）",
+                    raw_path, len(tags))
+    return tags
+
+
+def load_exif_summary(raw_path: str) -> str:
+    """读取图片 EXIF，返回一行式拍摄参数摘要；不可用或读取失败返回空串。"""
+    tags = _read_exif_tags(raw_path)
+    if not tags:
+        logger.info("图片无可用 EXIF: %s", raw_path)
+        return ""
+
+    parts = []
+    for label, exifread_names, pil_names in _EXIF_FIELD_MAP:
+        value = None
+        for name in exifread_names:
+            if name in tags:
+                value = tags[name]
+                break
+        if value is None:
+            for name in pil_names:
+                if name in tags:
+                    value = tags[name]
+                    break
+        if value is None:
+            continue
+        text = _format_exif_value(value)
+        if not text:
+            continue
+        parts.append(f"{label}={text}")
+    return "，".join(parts)
+
+
+def build_exif_context(image_paths) -> str:
+    """
+    按图片顺序构建 EXIF 描述段落，追加到 user prompt 末尾。
+
+    - 单张：`拍摄参数：厂商=...，相机=...`
+    - 多张：按"第 N 张"编号，与 prompt 中的照片顺序严格对齐
+    - 全部缺失 / 全部读取失败时返回空串（调用方保持原 prompt 不变）
+    """
+    paths = list(image_paths or [])
+    if not paths:
+        return ""
+
+    lines = []
+    for i, p in enumerate(paths, 1):
+        summary = load_exif_summary(p)
+        if not summary:
+            continue
+        if len(paths) == 1:
+            lines.append(f"拍摄参数：{summary}")
+        else:
+            lines.append(f"第 {i} 张：{summary}")
+    if not lines:
+        return ""
+    return "【照片拍摄参数（EXIF）】\n" + "\n".join(lines)
+
+
+# ----------------------------- JSON 提取 -----------------------------
 def _extract_first_json_object(text: str):
     """
     从任意文本中提取第一个完整的 JSON 对象（字符串）。
@@ -101,13 +352,23 @@ def _extract_first_json_object(text: str):
 class LLMClient:
     """兼容 OpenAI 的 LLM 客户端"""
 
-    def __init__(self, api_base: str, api_key: str, model: str):
+    def __init__(self, api_base: str, api_key: str, model: str,
+                 thinking=None, reasoning_cb=None):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.model = model
-        logger.info("创建 LLM 客户端：model=%s，api_base=%s，API Key %s",
+        # None = 不干预（接口默认）；True/False = 显式开启 / 关闭原生思考
+        self.thinking = thinking
+        # 可选回调：收到原生思考内容（reasoning_content）时调用，
+        # 由 UI 决定显示到哪里；回调异常不能影响主流程。
+        self.reasoning_cb = reasoning_cb
+        logger.info("创建 LLM 客户端：model=%s，api_base=%s，API Key %s，"
+                    "原生思考=%s，思考回调=%s",
                     self.model, self.api_base,
-                    "已配置" if self.api_key else "未配置（请求将失败）")
+                    "已配置" if self.api_key else "未配置（请求将失败）",
+                    {None: "不干预", True: "开启",
+                     False: "关闭"}.get(self.thinking, self.thinking),
+                    "已设置" if self.reasoning_cb else "未设置")
 
     def request_json(self, system_prompt: str, user_prompt: str,
                      image_path: str, max_tokens=1024,
@@ -131,11 +392,23 @@ class LLMClient:
 
         image_paths 中的图片按顺序出现在 user 消息里，与 user_prompt
         中的"第 N 张"编号一一对应。其余行为与 request_json 相同。
+
+        发送前会自动读取每张图片的 EXIF（拍摄参数）并附加到 user prompt
+        末尾；读取失败 / 字段缺失时静默降级，不影响主流程。
         """
         paths = [p for p in (image_paths or []) if p]
         if not paths:
             logger.error("request_json_multi 调用失败：未提供任何图片")
             raise ValueError("request_json_multi 至少需要一张图片")
+
+        # 读取 EXIF 并附加到 user prompt；失败时优雅降级，不阻塞请求
+        exif_text = build_exif_context(paths)
+        if exif_text:
+            user_prompt = f"{user_prompt}\n\n{exif_text}"
+            logger.info("已在 user prompt 中附加 EXIF 信息（%d 张照片，"
+                        "新增 %d 字符）", len(paths), len(exif_text))
+        else:
+            logger.info("未读到可用的 EXIF 信息，user prompt 保持原样")
 
         logger.info("准备请求 LLM：model=%s，图片 %d 张，max_tokens=%d，"
                     "system prompt %d 字符，user prompt %d 字符",
@@ -171,6 +444,12 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": 0.2
         }
+        # 支持的模型带上原生思考开关；不支持的模型不会发送该字段
+        thinking_fields = build_thinking_fields(self.model, self.thinking)
+        payload.update(thinking_fields)
+        thinking_desc = ("不干预"
+                         if not thinking_fields else
+                         thinking_fields["thinking"]["type"])
         url = f"{self.api_base}/chat/completions"
         # 只统计文本与图片数据量，避免为了算长度把整段 base64 序列化一遍
         text_chars = 0
@@ -189,9 +468,9 @@ class LLMClient:
                         text_chars += len(part.get("text", ""))
         logger.info("POST %s（model=%s，max_tokens=%d，messages=%d 条，"
                     "文本 %d 字符，图片 %d 张 / base64 %d 字符，"
-                    "stream=True，timeout=(10, 60)）",
+                    "原生思考=%s，stream=True，timeout=(10, 60)）",
                     url, self.model, max_tokens, len(messages),
-                    text_chars, image_count, image_chars)
+                    text_chars, image_count, image_chars, thinking_desc)
 
         # 用 stream=True 以便逐块读取，并在用户点停止时尽快中断。
         # timeout=(connect, read)：连接 10s，块间读取 60s。
@@ -235,12 +514,36 @@ class LLMClient:
 
         try:
             data = json.loads(body.decode("utf-8"))
-            content = data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
         except Exception as e:
             logger.error("解析 LLM 响应外层结构失败: %s（body 前 300 字符: %s）",
                          e, body.decode("utf-8", errors="replace")[:300])
             raise
 
+        # 开启原生思考时，模型会先在 reasoning_content 里输出推理过程，
+        # 最终的 JSON 仍在 content 里；这里只记录 CoT 长度，不做解析。
+        reasoning = (message.get("reasoning_content") or "").strip()
+        if reasoning:
+            logger.info("模型原生思考过程 %d 字符，前 200 字符: %s",
+                        len(reasoning), reasoning[:200].replace("\n", " "))
+            if self.reasoning_cb is not None:
+                try:
+                    self.reasoning_cb(reasoning)
+                except Exception as e:
+                    # UI 显示失败不能影响处理流程
+                    logger.warning("推送原生思考内容到界面失败: %s", e)
+
+        content = (message.get("content") or "").strip()
+        if not content:
+            # 思考模式下 max_tokens 可能被推理过程吃光，导致正文为空；
+            # 把情况说清楚，便于排查（也兼容返回 None 的接口）
+            logger.error("LLM 返回正文为空（reasoning_content %d 字符）",
+                         len(reasoning))
+            raise ValueError(
+                "LLM 返回正文为空"
+                + ("（推理内容已返回，但最终答案缺失，"
+                   "可尝试调大 max_tokens 或关闭原生思考）"
+                   if reasoning else ""))
         logger.info("LLM 文本回复 %d 字符，前 200 字符: %s",
                     len(content), content[:200].replace("\n", " "))
 

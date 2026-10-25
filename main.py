@@ -16,7 +16,7 @@ from settings_page import SettingsPage    #设置页
 from rt_processor import check_rt_cli   #RT处理
 from about import AboutWidget    #关于页
 from settings import ensure_config_dir, migrate_legacy_files
-from log_setup import setup_logging, get_log_file
+from log_setup import setup_logging, get_log_file   #日志
 
 
 logger = logging.getLogger(__name__)
@@ -109,12 +109,32 @@ class MainWindow(QMainWindow):
         is_dark = scheme == Qt.ColorScheme.Dark
         logger.info("应用主题: %s", "深色" if is_dark else "浅色")
 
+#这里的QSS是全局的，目前重点优化了滑条
+#以后有时间了可以优化
+#或者单独提出去让用户可以自己导入新的风格。。。
+#现在的只能说够用
+
         if is_dark:
             qss = """
             QMainWindow, QWidget { background: #191919; color: #ffffff; }
             #toggleBtn { background: transparent; border: none; color: #ffffff; font-size: 18px; border-radius: 4px; }
             #toggleBtn:hover { background: #2d2d2d; }
             #titleLabel { font-size: 14px; font-weight: 600; color: #ffffff; }
+            #sectionHeader { background: #232323; border: 1px solid #333333; border-radius: 6px; padding: 8px 12px; text-align: left; font-weight: 600; color: #ffffff; }
+            #sectionHeader:hover { background: #2d2d2d; }
+            #sectionHeader:checked { background: #202020; }
+            #sectionContent { background: transparent; }
+            #actionBar { background: #202020; border-top: 1px solid #333333; }
+            #thinkingBar { background: #202020; border: 1px solid #333333; border-radius: 10px; }
+            #thinkingHint { color: #a0a0a0; font-size: 12px; }
+            #cotView { background: #191919; border: 1px solid #333333; border-radius: 6px; color: #c0c0c0; font-size: 12px; }
+            #thinkingBar QLabel, #thinkingBar QCheckBox { background: transparent; }
+            #thinkingToggle { background: transparent; border: none; color: #ffffff; font-size: 14px; }
+            #thinkingToggle:hover { color: #2d8cf0; }
+            QCheckBox { spacing: 8px; }
+            QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #6e6e6e; border-radius: 4px; background: #202020; }
+            QCheckBox::indicator:hover { border-color: #2d8cf0; }
+            QCheckBox::indicator:checked { background: #2563eb; border-color: #2563eb; }
             QSplitter::handle { background: #333333; }
             QListWidget#sidebar { background: #202020; border: none; outline: none; padding: 4px; }
             QListWidget#sidebar::item { height: 40px; padding-left: 16px; border-radius: 6px; color: #ffffff; }
@@ -195,6 +215,21 @@ class MainWindow(QMainWindow):
             #toggleBtn { background: transparent; border: none; color: #1b1b1b; font-size: 18px; border-radius: 4px; }
             #toggleBtn:hover { background: #e6e6e6; }
             #titleLabel { font-size: 14px; font-weight: 600; color: #1b1b1b; }
+            #sectionHeader { background: #ffffff; border: 1px solid #d0d0d0; border-radius: 6px; padding: 8px 12px; text-align: left; font-weight: 600; color: #1b1b1b; }
+            #sectionHeader:hover { background: #eaeaea; }
+            #sectionHeader:checked { background: #f0f0f0; }
+            #sectionContent { background: transparent; }
+            #actionBar { background: #f9f9f9; border-top: 1px solid #d0d0d0; }
+            #thinkingBar { background: #ffffff; border: 1px solid #d0d0d0; border-radius: 10px; }
+            #thinkingHint { color: #666666; font-size: 12px; }
+            #cotView { background: #f9f9f9; border: 1px solid #d0d0d0; border-radius: 6px; color: #444444; font-size: 12px; }
+            #thinkingBar QLabel, #thinkingBar QCheckBox { background: transparent; }
+            #thinkingToggle { background: transparent; border: none; color: #1b1b1b; font-size: 14px; }
+            #thinkingToggle:hover { color: #0067c0; }
+            QCheckBox { spacing: 8px; }
+            QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #b0b0b0; border-radius: 4px; background: #ffffff; }
+            QCheckBox::indicator:hover { border-color: #0067c0; }
+            QCheckBox::indicator:checked { background: #0067c0; border-color: #0067c0; }
             QSplitter::handle { background: #d0d0d0; }
             QListWidget#sidebar { background: #f9f9f9; border: none; outline: none; padding: 4px; }
             QListWidget#sidebar::item { height: 40px; padding-left: 16px; border-radius: 6px; color: #1b1b1b; }
@@ -309,6 +344,7 @@ class MainWindow(QMainWindow):
                 "（Windows 为 rawtherapee-cli.exe，"
                 "Linux/macOS 为 rawtherapee-cli）。")
 
+#上面的以后可以考虑加入LR/LRC的兼容项
 
 def main():
     log_file = setup_logging()

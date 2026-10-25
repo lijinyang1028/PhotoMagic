@@ -19,6 +19,7 @@ from rt_processor import (
     load_custom_params, save_custom_params,
     clear_custom_params,
     normalize_rt_cli_path, rt_cli_file_candidates, is_rt_cli_executable,
+    get_rt_cli_version,
 )
 
 
@@ -65,8 +66,21 @@ def _profile_label(profile: dict) -> str:
     return f"{name}  ·  {model}"
 
 
+# 还没有记忆任何 RT 版本时下拉框里的占位项
+_RT_EMPTY_VERSION_LABEL = "（尚未保存版本 · 自动从 PATH 查找）"
+
+
+def _rt_version_label(version: dict) -> str:
+    """RT 版本下拉框的显示文本：名称 · 可执行文件名。"""
+    name = (version.get("name") or "未命名版本").strip()
+    path = (version.get("path") or "").strip()
+    if not path:
+        return f"{name}  ·  自动从 PATH 查找"
+    return f"{name}  ·  {os.path.basename(path) or path}"
+
+
 class SettingsPage(QWidget):
-    """设置页：管理多套 API 配置方案、自定义参数。"""
+    """设置页：管理多套 API 配置方案、多个 RawTherapee 版本、自定义参数。"""
 
     # 保存 / 切换 / 清除 API 配置后发出，供其他页面刷新
     api_config_changed = pyqtSignal()
@@ -77,6 +91,8 @@ class SettingsPage(QWidget):
         self._api_key_visible = False
         self._loading_profile = False
         self._current_profile_id = ""
+        self._loading_rt_version = False
+        self._current_rt_version_id = ""
         self.init_ui()
         self.load_from_settings()
         logger.info("设置页初始化完成：配置目录 %s，钥匙串 %s",
@@ -113,6 +129,8 @@ class SettingsPage(QWidget):
             f"配置文件目录：{settings.CONFIG_DIR}\n"
             "可保存多套 API 配置方案（名称 / 接口地址 / 模型）；"
             "每套方案的 API Key 分别保存在系统钥匙串，其余配置写入 settings.json。\n"
+            "可同时记忆多个 RawTherapee 版本（名称 / rawtherapee-cli 路径），"
+            "随时切换当前使用的版本。\n"
             f"日志目录：{settings.LOG_DIR}（每次运行一个文件，保留最近 5 次）"
         )
         subtitle.setObjectName("settingsSubtitle")
@@ -200,21 +218,58 @@ class SettingsPage(QWidget):
 
         layout.addWidget(llm_group)
 
-        # ---------- RawTherapee ----------
-        rt_group = QGroupBox("RawTherapee")
+        # ---------- RawTherapee（多版本） ----------
+        rt_group = QGroupBox("RawTherapee（可记忆多个版本）")
         rt_form = QFormLayout(rt_group)
+
+        # 版本下拉：选择即切换当前使用的版本
+        rt_version_row = QHBoxLayout()
+        self.rt_version_combo = QComboBox()
+        self.rt_version_combo.setMinimumWidth(280)
+        self.rt_version_combo.currentIndexChanged.connect(
+            self._on_rt_version_changed)
+        rt_version_row.addWidget(self.rt_version_combo, 1)
+
+        self.btn_new_rt_version = QPushButton("新建")
+        self.btn_new_rt_version.clicked.connect(self.create_rt_version)
+        rt_version_row.addWidget(self.btn_new_rt_version)
+
+        self.btn_rename_rt_version = QPushButton("重命名")
+        self.btn_rename_rt_version.clicked.connect(self.rename_rt_version)
+        rt_version_row.addWidget(self.btn_rename_rt_version)
+
+        self.btn_delete_rt_version = QPushButton("删除")
+        self.btn_delete_rt_version.clicked.connect(self.delete_rt_version)
+        rt_version_row.addWidget(self.btn_delete_rt_version)
+        rt_form.addRow("RT 版本:", rt_version_row)
+
+        self.rt_name_edit = QLineEdit()
+        self.rt_name_edit.setPlaceholderText(
+            "给这个版本起个名字，例如「5.9 稳定版」「5.10 开发版」")
+        rt_form.addRow("版本名称:", self.rt_name_edit)
 
         rt_path_row = QHBoxLayout()
         self.rt_path_edit = QLineEdit()
         self.rt_path_edit.setPlaceholderText(
-            "留空则自动从系统 PATH 查找；也可手动指定，例如 "
+            "留空则该版本自动从系统 PATH 查找；也可手动指定，例如 "
             + _rt_cli_example_path())
         rt_path_row.addWidget(self.rt_path_edit, 1)
 
         self.btn_browse_rt = QPushButton("浏览…")
         self.btn_browse_rt.clicked.connect(self.browse_rt_cli)
         rt_path_row.addWidget(self.btn_browse_rt)
+
+        self.btn_detect_rt = QPushButton("检测版本")
+        self.btn_detect_rt.clicked.connect(self.detect_rt_cli_version)
+        rt_path_row.addWidget(self.btn_detect_rt)
         rt_form.addRow("rawtherapee-cli 路径:", rt_path_row)
+
+        rt_hint = QLabel(
+            "可同时保存多个不同版本的 RawTherapee（每个版本一条路径），"
+            "用下拉框切换后，「处理」页会立即使用当前版本的 rawtherapee-cli。")
+        rt_hint.setObjectName("settingsHint")
+        rt_hint.setWordWrap(True)
+        rt_form.addRow("", rt_hint)
 
         self.rt_status = QLabel("")
         self.rt_status.setObjectName("settingsHint")
@@ -222,8 +277,8 @@ class SettingsPage(QWidget):
         rt_form.addRow("", self.rt_status)
 
         rt_btn_row = QHBoxLayout()
-        self.btn_save_rt = QPushButton("保存路径")
-        self.btn_save_rt.clicked.connect(self.save_rt_cli_path)
+        self.btn_save_rt = QPushButton("保存当前版本")
+        self.btn_save_rt.clicked.connect(self.save_rt_version)
         rt_btn_row.addWidget(self.btn_save_rt)
 
         self.btn_autodetect_rt = QPushButton("自动检测")
@@ -278,11 +333,10 @@ class SettingsPage(QWidget):
         self._reload_profiles()
         self._refresh_keyring_status()
         self._refresh_custom_status()
-        self.rt_path_edit.setText(
-            normalize_rt_cli_path(settings.get_rawtherapee_cli_path()))
+        self._reload_rt_versions()
         self._refresh_rt_status()
 
-    # ---------------- RawTherapee 路径 ----------------
+    # ---------------- RawTherapee：多版本 ----------------
     def _normalize_rt_cli_path(self, raw: str):
         """整理用户输入；目录会自动补上可执行文件名。返回 (路径, 错误信息)。"""
         path = normalize_rt_cli_path(raw)
@@ -310,32 +364,183 @@ class SettingsPage(QWidget):
             return path, "指定的文件不存在。"
         return os.path.abspath(path), ""
 
+    def _reload_rt_versions(self, select_id: str = ""):
+        """重建 RT 版本下拉框，并把选中版本载入表单。"""
+        versions = settings.list_rt_versions()
+        active_id = select_id or settings.get_active_rt_version_id()
+        self._loading_rt_version = True
+        try:
+            self.rt_version_combo.clear()
+            for version in versions:
+                self.rt_version_combo.addItem(_rt_version_label(version),
+                                              version["id"])
+                self.rt_version_combo.setItemData(
+                    self.rt_version_combo.count() - 1,
+                    version.get("path", ""),
+                    Qt.ItemDataRole.ToolTipRole)
+
+            if not versions:
+                self.rt_version_combo.addItem(_RT_EMPTY_VERSION_LABEL, "")
+
+            index = self.rt_version_combo.findData(active_id)
+            if index < 0:
+                index = 0
+                active_id = self.rt_version_combo.itemData(0) or ""
+            if index >= 0:
+                self.rt_version_combo.setCurrentIndex(index)
+
+            version = settings.get_rt_version(active_id) if active_id else None
+            if version is not None:
+                self._load_rt_version_form(version)
+            else:
+                self._current_rt_version_id = ""
+                self.rt_name_edit.clear()
+                self.rt_path_edit.clear()
+        finally:
+            self._loading_rt_version = False
+        logger.info("已载入 %d 个 RT 版本，当前版本 id=%s",
+                    len(versions), self._current_rt_version_id)
+
+    def _load_rt_version_form(self, version: dict):
+        """把一条 RT 版本填入表单。"""
+        self._loading_rt_version = True
+        try:
+            self.rt_name_edit.setText(version.get("name", ""))
+            self.rt_path_edit.setText(
+                normalize_rt_cli_path(version.get("path", "")))
+            self._current_rt_version_id = version["id"]
+        finally:
+            self._loading_rt_version = False
+        logger.info("设置页已载入 RT 版本「%s」：%s",
+                    version.get("name", ""),
+                    version.get("path") or "（自动从 PATH 查找）")
+
+    def _restore_rt_combo_selection(self):
+        """把下拉框恢复到当前版本，不触发切换逻辑。"""
+        self._loading_rt_version = True
+        try:
+            index = self.rt_version_combo.findData(
+                self._current_rt_version_id)
+            if index >= 0:
+                self.rt_version_combo.setCurrentIndex(index)
+        finally:
+            self._loading_rt_version = False
+
+    def _rt_form_dirty(self) -> bool:
+        """当前 RT 版本表单是否有未保存的修改。"""
+        if not self._current_rt_version_id:
+            return bool(self.rt_name_edit.text().strip()
+                        or self.rt_path_edit.text().strip())
+        version = settings.get_rt_version(self._current_rt_version_id)
+        if version is None:
+            return True
+        if self.rt_name_edit.text().strip() != version.get("name", ""):
+            return True
+        return (normalize_rt_cli_path(self.rt_path_edit.text())
+                != normalize_rt_cli_path(version.get("path", "")))
+
+    def _confirm_rt_unsaved_changes(self) -> bool:
+        """
+        RT 版本表单有未保存修改时询问用户。
+
+        返回 True 表示可以继续（已保存 / 用户选择不保存）；
+        返回 False 表示用户取消。
+        """
+        if not self._rt_form_dirty():
+            return True
+        name = self.rt_name_edit.text().strip() or "当前版本"
+        box = QMessageBox(self)
+        box.setWindowTitle("未保存的修改")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"RT 版本「{name}」有未保存的修改，要先保存吗？")
+        save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton(
+            "不保存", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save_btn:
+            return self.save_rt_version()
+        if clicked is discard_btn:
+            # 表单恢复成已保存内容，避免「不保存」后仍以旧编辑值继续操作
+            version = (settings.get_rt_version(self._current_rt_version_id)
+                       if self._current_rt_version_id else None)
+            if version is not None:
+                self._load_rt_version_form(version)
+            else:
+                self._loading_rt_version = True
+                try:
+                    self.rt_name_edit.clear()
+                    self.rt_path_edit.clear()
+                finally:
+                    self._loading_rt_version = False
+            return True
+        logger.info("用户取消切换 RT 版本（放弃未保存修改前先取消）")
+        return False
+
+    def _on_rt_version_changed(self, index: int):
+        if self._loading_rt_version or index < 0:
+            return
+        target_id = self.rt_version_combo.itemData(index) or ""
+        if target_id == self._current_rt_version_id:
+            return
+        if not self._confirm_rt_unsaved_changes():
+            self._restore_rt_combo_selection()
+            return
+        if target_id and not settings.set_active_rt_version(target_id):
+            QMessageBox.warning(self, "切换失败", "无法切换 RT 版本，请重试。")
+            self._restore_rt_combo_selection()
+            return
+        version = settings.get_rt_version(target_id) if target_id else None
+        if version is not None:
+            self._current_rt_version_id = target_id
+            self._load_rt_version_form(version)
+            self.status_label.setText(
+                f"已切换到 RT 版本「{version['name']}」。")
+            logger.info("用户切换 RT 版本为「%s」（id=%s）",
+                        version["name"], target_id)
+        self._refresh_rt_status()
+
     def _refresh_rt_status(self):
-        """显示当前生效的 rawtherapee-cli（手动指定优先，其次 PATH）。"""
-        manual = normalize_rt_cli_path(settings.get_rawtherapee_cli_path())
-        active = ""
+        """显示当前 RT 版本与真正生效的 rawtherapee-cli。"""
+        versions = settings.list_rt_versions()
+        active = settings.get_active_rt_version()
+        manual = normalize_rt_cli_path(
+            (active or {}).get("path")
+            or settings.get_rawtherapee_cli_path())
+        if active is not None:
+            head = (f"已记忆 {len(versions)} 个 RT 版本，"
+                    f"当前使用「{active['name']}」。")
+        else:
+            head = "尚未记忆任何 RT 版本。"
+
+        active_path = ""
         if manual:
             for candidate in rt_cli_file_candidates(manual):
                 if is_rt_cli_executable(candidate):
-                    active = candidate
+                    active_path = candidate
                     break
-        if manual and active:
-            self.rt_status.setText(f"✓ 使用手动指定的路径：{active}")
+
+        if active_path:
+            detail = f"✓ 实际调用：{active_path}"
         elif manual:
-            self.rt_status.setText(
-                f"⚠ 手动指定的路径不可用：{manual}\n"
-                "程序会自动回退到系统 PATH 查找；请重新选择或点「自动检测」。")
+            detail = (f"⚠ 当前版本的路径不可用：{manual}\n"
+                      "程序会自动回退到系统 PATH 查找；"
+                      "请重新选择路径并保存。")
         else:
             found = shutil.which("rawtherapee-cli")
             if found:
-                self.rt_status.setText(f"✓ 已在系统 PATH 中找到：{found}")
+                detail = f"✓ 未指定路径，使用系统 PATH 中的：{found}"
             else:
-                self.rt_status.setText(
+                detail = (
                     "⚠ 未在系统 PATH 中找到 rawtherapee-cli。\n"
-                    f"请点「浏览…」手动指定 {_rt_cli_name_hint()}，"
-                    "或把 RawTherapee 安装目录加入系统 PATH。")
-        logger.info("RawTherapee 状态：手动路径=%s，实际生效=%s",
-                    manual or "未指定", active or "未使用手动路径")
+                    f"请点「浏览…」指定 {_rt_cli_name_hint()} 并保存为一个 "
+                    "RT 版本，或把 RawTherapee 安装目录加入系统 PATH。")
+        self.rt_status.setText(head + "\n" + detail)
+        logger.info("RawTherapee 状态：%d 个版本，当前版本=%s，实际生效=%s",
+                    len(versions), (active or {}).get("name", "无"),
+                    active_path or "未使用手动路径")
 
     def browse_rt_cli(self):
         current = normalize_rt_cli_path(self.rt_path_edit.text())
@@ -348,13 +553,43 @@ class SettingsPage(QWidget):
             return
         self.rt_path_edit.setText(path)
         self.status_label.setText(
-            "已选择 rawtherapee-cli 路径，点「保存路径」后生效。")
+            "已选择 rawtherapee-cli 路径，可点「检测版本」自动填写名称，"
+            "点「保存当前版本」后生效。")
         logger.info("用户选择 rawtherapee-cli 路径: %s", path)
+
+    def detect_rt_cli_version(self):
+        """调用 rawtherapee-cli --version，把版本号填进名称（名称空时）。"""
+        path, error = self._normalize_rt_cli_path(self.rt_path_edit.text())
+        if error:
+            QMessageBox.warning(
+                self, "路径无效",
+                error + f"\n\n请输入 {_rt_cli_name_hint()} 的完整路径，"
+                "或留空让程序自动从 PATH 查找。")
+            logger.warning("检测 RawTherapee 版本失败：%s（%s）", error, path)
+            return
+        if path:
+            self.rt_path_edit.setText(path)
+        version = get_rt_cli_version(path)
+        if not version:
+            self.status_label.setText(
+                "未能读取 RawTherapee 版本号，请手动填写版本名称。")
+            QMessageBox.information(
+                self, "未读取到版本号",
+                "无法从该 rawtherapee-cli 读取版本号。\n"
+                "请确认路径有效，或手动填写版本名称。")
+            logger.warning("检测 RawTherapee 版本失败：%s",
+                           path or "（PATH 中的 rawtherapee-cli）")
+            return
+        if not self.rt_name_edit.text().strip():
+            self.rt_name_edit.setText(version)
+        self.status_label.setText(
+            f"检测到 RawTherapee {version}，点「保存当前版本」后生效。")
+        logger.info("检测到 RawTherapee 版本 %s：%s",
+                    version, path or "（PATH 中的 rawtherapee-cli）")
 
     def autodetect_rt_cli(self):
         found = shutil.which("rawtherapee-cli")
         if not found:
-            self.rt_path_edit.clear()
             self.status_label.setText(
                 "系统 PATH 中未找到 rawtherapee-cli，请手动指定路径。")
             QMessageBox.information(
@@ -364,32 +599,186 @@ class SettingsPage(QWidget):
             logger.warning("自动检测 rawtherapee-cli：PATH 中未找到")
             return
         self.rt_path_edit.setText(found)
+        if not self.rt_name_edit.text().strip():
+            detected = get_rt_cli_version(found)
+            if detected:
+                self.rt_name_edit.setText(detected)
         self.status_label.setText(
-            f"已自动检测到 rawtherapee-cli：{found}，点「保存路径」后生效。")
+            f"已自动检测到 rawtherapee-cli：{found}，"
+            "点「保存当前版本」后生效。")
         logger.info("自动检测到 rawtherapee-cli: %s", found)
 
-    def save_rt_cli_path(self):
+    def save_rt_version(self) -> bool:
+        """把表单保存为一个 RT 版本，并设为当前使用的版本。"""
         path, error = self._normalize_rt_cli_path(self.rt_path_edit.text())
         if error:
             QMessageBox.warning(
                 self, "路径无效",
                 error + f"\n\n请输入 {_rt_cli_name_hint()} 的完整路径，"
                 "或留空让程序自动从 PATH 查找。")
-            logger.warning("保存 rawtherapee-cli 路径失败：%s（%s）", error, path)
-            return
+            logger.warning("保存 RT 版本失败：%s（%s）", error, path)
+            return False
+        name = self.rt_name_edit.text().strip()
+        if not name:
+            detected = get_rt_cli_version(path)
+            if detected:
+                name = detected
+                self.rt_name_edit.setText(name)
+            else:
+                QMessageBox.warning(
+                    self, "保存失败",
+                    "请先填写版本名称（例如「5.9 稳定版」）。\n"
+                    "也可以点「检测版本」自动读取当前路径的版本号。")
+                self.rt_name_edit.setFocus()
+                return False
         try:
-            settings.set_rawtherapee_cli_path(path)
+            version = settings.save_rt_version(
+                name=name,
+                path=path,
+                version_id=self._current_rt_version_id,
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, "保存失败", str(e))
+            return False
         except Exception as e:
-            logger.exception("保存 rawtherapee-cli 路径失败: %s", e)
+            logger.exception("保存 RT 版本失败: %s", e)
             QMessageBox.warning(self, "保存失败", f"无法写入配置文件：{e}")
-            return
+            return False
+
         self.rt_path_edit.setText(path)
+        self._reload_rt_versions(select_id=version["id"])
         self._refresh_rt_status()
         if path:
-            self.status_label.setText(f"已保存 rawtherapee-cli 路径：{path}")
+            self.status_label.setText(
+                f"已保存 RT 版本「{name}」并设为当前版本：{path}")
         else:
             self.status_label.setText(
-                "已清空手动路径，程序会从系统 PATH 查找 rawtherapee-cli。")
+                f"已保存 RT 版本「{name}」并设为当前版本"
+                "（未指定路径，从系统 PATH 查找）。")
+        logger.info("RT 版本「%s」保存成功（id=%s）",
+                    name, version["id"])
+        return True
+
+    # ---------------- RT 版本：新建 / 重命名 / 删除 ----------------
+    def create_rt_version(self):
+        # 还没有保存过版本时，表单里的名称 / 路径就是要新建的内容，不必先提示保存
+        if (self._current_rt_version_id
+                and not self._confirm_rt_unsaved_changes()):
+            return
+        existing = {v["name"].casefold()
+                    for v in settings.list_rt_versions()}
+        serial = 1
+        while f"版本 {serial}".casefold() in existing:
+            serial += 1
+        suggested = (f"版本 {serial}" if self._current_rt_version_id
+                     else (self.rt_name_edit.text().strip()
+                           or f"版本 {serial}"))
+        name, ok = QInputDialog.getText(
+            self, "新建 RT 版本", "版本名称：", text=suggested)
+        if not ok:
+            logger.info("用户取消新建 RT 版本")
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "新建失败", "版本名称不能为空。")
+            return
+        # 新版本沿用当前表单里的路径，方便先浏览选好再新建
+        path, error = self._normalize_rt_cli_path(self.rt_path_edit.text())
+        if error:
+            QMessageBox.warning(self, "新建失败", error)
+            return
+        try:
+            version = settings.save_rt_version(name=name, path=path)
+        except ValueError as e:
+            QMessageBox.warning(self, "新建失败", str(e))
+            return
+        except Exception as e:
+            logger.exception("新建 RT 版本失败: %s", e)
+            QMessageBox.warning(self, "新建失败", f"无法写入配置文件：{e}")
+            return
+        self._reload_rt_versions(select_id=version["id"])
+        self._refresh_rt_status()
+        self.status_label.setText(
+            f"已新建 RT 版本「{name}」，可在路径框中修改后点「保存当前版本」。")
+        logger.info("已新建 RT 版本「%s」（id=%s）", name, version["id"])
+
+    def rename_rt_version(self):
+        version = (settings.get_rt_version(self._current_rt_version_id)
+                   if self._current_rt_version_id else None)
+        if version is None:
+            QMessageBox.information(self, "无法重命名",
+                                    "请先保存一个 RT 版本。")
+            return
+        if not self._confirm_rt_unsaved_changes():
+            return
+        # 确认过程中可能保存过表单，重新取一次最新的版本数据
+        version = settings.get_rt_version(self._current_rt_version_id)
+        if version is None:
+            return
+        name, ok = QInputDialog.getText(
+            self, "重命名 RT 版本", "新名称：", text=version["name"])
+        if not ok:
+            logger.info("用户取消重命名 RT 版本")
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "重命名失败", "版本名称不能为空。")
+            return
+        if name == version["name"]:
+            return
+        try:
+            settings.rename_rt_version(version["id"], name)
+        except ValueError as e:
+            QMessageBox.warning(self, "重命名失败", str(e))
+            return
+        except Exception as e:
+            logger.exception("重命名 RT 版本失败: %s", e)
+            QMessageBox.warning(self, "重命名失败", f"无法写入配置文件：{e}")
+            return
+        self._reload_rt_versions(select_id=version["id"])
+        self.status_label.setText(f"已将 RT 版本重命名为「{name}」。")
+        logger.info("已把 RT 版本「%s」重命名为「%s」",
+                    version["name"], name)
+
+    def delete_rt_version(self):
+        version = (settings.get_rt_version(self._current_rt_version_id)
+                   if self._current_rt_version_id else None)
+        if version is None:
+            QMessageBox.information(self, "无法删除", "请先保存一个 RT 版本。")
+            return
+        if not self._confirm_rt_unsaved_changes():
+            return
+        version = settings.get_rt_version(self._current_rt_version_id)
+        if version is None:
+            return
+        if QMessageBox.question(
+            self, "确认删除",
+            f"删除 RT 版本「{version['name']}」？\n"
+            "删除后不再记忆该版本路径；若它是当前版本，"
+            "会自动切换到剩余版本（没有剩余版本时回退到系统 PATH）。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            logger.info("用户取消删除 RT 版本「%s」", version["name"])
+            return
+        if not settings.delete_rt_version(version["id"]):
+            self.status_label.setText("删除 RT 版本失败，请重试。")
+            logger.warning("删除 RT 版本失败：%s", version["id"])
+            return
+        self._reload_rt_versions()
+        self._refresh_rt_status()
+        remaining = settings.get_active_rt_version()
+        if remaining is not None:
+            self.status_label.setText(
+                f"已删除 RT 版本「{version['name']}」，"
+                f"当前版本：「{remaining['name']}」。")
+        else:
+            self.status_label.setText(
+                f"已删除 RT 版本「{version['name']}」，"
+                "将从系统 PATH 查找 rawtherapee-cli。")
+        logger.info("已删除 RT 版本「%s」，当前版本为 %s",
+                    version["name"],
+                    remaining["name"] if remaining else "（PATH）")
 
     # ---------------- 配置方案：加载 / 切换 ----------------
     def _reload_profiles(self, select_id: str = ""):

@@ -3,6 +3,7 @@ PhotoMagic 配置管理
 
 - 非敏感配置：~/.photomagic/settings.json
   包含多套 LLM 配置方案（名称 / API Base URL / Model）、当前选中的方案、
+  多套 RawTherapee 版本（名称 / rawtherapee-cli 路径）、当前使用的版本、
   输出格式、并发数、AI 强度等
 - API Key：系统钥匙串（keyring），按配置方案分别保存
   Windows: Credential Manager
@@ -42,6 +43,9 @@ KEYRING_PROFILE_PREFIX = "api_key:"     # 多套配置方案的钥匙串条目�
 DEFAULT_PROFILE_ID = "default"
 DEFAULT_PROFILE_NAME = "默认配置"
 
+# 旧版只有一条 rawtherapee-cli 路径时，迁移后使用的 RT 版本名称
+RT_DEFAULT_VERSION_NAME = "默认版本"
+
 _LEGACY_CUSTOM_PARAMS = Path.home() / ".photomagic_custom_params.json"
 
 
@@ -51,6 +55,11 @@ DEFAULT_SETTINGS = {
     "active_api_profile": "",
     "api_base": "https://api.openai.com/v1",
     "model": "gpt-4o",
+    # 是否让支持原生思考的模型先输出推理过程（DeepSeek 的 thinking 开关）；
+    # 不支持的模型会自动忽略该设置。
+    "thinking_enabled": True,
+    # 单次请求允许模型输出的最大 token 数（处理页「LLM 接口」里可调）
+    "max_tokens": 1024,
     "output_dir": "",
     "output_format": 0,
     "bit_depth": 1,
@@ -60,8 +69,12 @@ DEFAULT_SETTINGS = {
     "strength": 100,
     "unify_style": False,
     # 手动指定的 rawtherapee-cli 可执行文件路径；
-    # 为空表示只在系统 PATH 中查找
+    # 为空表示只在系统 PATH 中查找。
+    # 该字段始终与当前选中的 RT 版本路径保持同步（兼容旧代码）。
     "rawtherapee_cli_path": "",
+    # 多套 RawTherapee 版本：名称 + rawtherapee-cli 路径，可在设置页切换
+    "rawtherapee_versions": [],
+    "active_rawtherapee_version": "",
 }
 
 
@@ -131,6 +144,12 @@ def migrate_legacy_files():
         ensure_api_profiles()
     except Exception as e:
         logger.warning("迁移旧版 API 配置方案失败: %s", e)
+
+    # 旧版只有一条 rawtherapee-cli 路径：升级为「RT 版本」
+    try:
+        ensure_rawtherapee_versions()
+    except Exception as e:
+        logger.warning("迁移旧版 RawTherapee 路径失败: %s", e)
 
 
 # ---------------- 配置方案（非敏感部分） ----------------
@@ -236,6 +255,80 @@ def normalize_api_profiles(data: dict):
     return data, changed
 
 
+def normalize_rt_versions(data: dict):
+    """
+    整理 rawtherapee_versions / active_rawtherapee_version，并让顶层
+    rawtherapee_cli_path 与当前版本保持同步（兼容旧代码）。
+
+    返回 (整理后的 data, 是否有改动)。不写盘、不启动任何外部程序。
+    """
+    changed = False
+    versions = data.get("rawtherapee_versions")
+    if not isinstance(versions, list):
+        versions = []
+        changed = True
+
+    cleaned = []
+    seen_ids = set()
+    seen_names = set()
+    for item in versions:
+        if not isinstance(item, dict):
+            changed = True
+            continue
+        version_id = _as_text(item.get("id"))
+        if not version_id or version_id in seen_ids:
+            version_id = _new_profile_id()
+            changed = True
+        name = _as_text(item.get("name"))
+        if not name:
+            name = f"RT 版本 {len(cleaned) + 1}"
+            changed = True
+        # 同名版本会让下拉框无法区分，自动加序号
+        base_name = name
+        serial = 2
+        while name.casefold() in seen_names:
+            name = f"{base_name} ({serial})"
+            serial += 1
+            changed = True
+        version = {
+            "id": version_id,
+            "name": name,
+            "path": _as_text(item.get("path")),
+        }
+        if version != item:
+            changed = True
+        seen_ids.add(version_id)
+        seen_names.add(name.casefold())
+        cleaned.append(version)
+
+    legacy_path = _as_text(data.get("rawtherapee_cli_path"))
+    if not cleaned and legacy_path:
+        # 旧版只有一条路径：升级为一个名为「默认版本」的 RT 版本
+        cleaned = [{
+            "id": _new_profile_id(),
+            "name": RT_DEFAULT_VERSION_NAME,
+            "path": legacy_path,
+        }]
+        changed = True
+
+    active = _as_text(data.get("active_rawtherapee_version"))
+    if active not in {v["id"] for v in cleaned}:
+        new_active = cleaned[0]["id"] if cleaned else ""
+        if new_active != active:
+            active = new_active
+            changed = True
+
+    data["rawtherapee_versions"] = cleaned
+    data["active_rawtherapee_version"] = active
+
+    active_version = _find_profile(cleaned, active) if active else None
+    active_path = _as_text(active_version.get("path")) if active_version else ""
+    if data.get("rawtherapee_cli_path") != active_path:
+        data["rawtherapee_cli_path"] = active_path
+        changed = True
+    return data, changed
+
+
 def _read_settings_file():
     """读取 settings.json；文件不存在或损坏时返回 None。"""
     if not SETTINGS_FILE.exists():
@@ -263,17 +356,21 @@ def load_settings() -> dict:
         merged = dict(DEFAULT_SETTINGS)
         merged.update(raw)
     merged, _ = normalize_api_profiles(merged)
-    logger.info("已读取设置: %s（%d 项，当前方案=%s，api_base=%s，model=%s）",
+    merged, _ = normalize_rt_versions(merged)
+    logger.info("已读取设置: %s（%d 项，当前方案=%s，api_base=%s，model=%s，"
+                "RT 版本=%d 个）",
                 SETTINGS_FILE, len(merged), merged.get("active_api_profile"),
-                merged.get("api_base"), merged.get("model"))
+                merged.get("api_base"), merged.get("model"),
+                len(merged.get("rawtherapee_versions", [])))
     return merged
 
 
 def save_settings(settings: dict) -> None:
-    """原子写入（先写 tmp 再 replace），并同步当前方案的顶层字段。"""
+    """原子写入（先写 tmp 再 replace），并同步当前方案 / 当前 RT 版本的顶层字段。"""
     ensure_config_dir()
     data = dict(settings)
     data, _ = normalize_api_profiles(data)
+    data, _ = normalize_rt_versions(data)
     tmp = SETTINGS_FILE.with_suffix(".json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -311,6 +408,33 @@ def ensure_api_profiles() -> bool:
     _migrate_legacy_keyring_key(data["api_profiles"])
     logger.info("已把旧版 API 配置迁移为配置方案（当前方案=%s）",
                 data["active_api_profile"])
+    return True
+
+
+def ensure_rawtherapee_versions() -> bool:
+    """
+    把旧版「单条 rawtherapee-cli 路径」升级为「RT 版本」并持久化（幂等）。
+
+    仅在确实有变化时写盘，返回是否发生了写盘。
+    """
+    raw = _read_settings_file()
+    if raw is None:
+        return False
+    data = dict(DEFAULT_SETTINGS)
+    data.update(raw)
+    data, changed = normalize_rt_versions(data)
+    if not changed:
+        return False
+    try:
+        save_settings(data)
+    except Exception as e:
+        logger.error("迁移旧版 RawTherapee 路径失败（写入 %s）: %s",
+                     SETTINGS_FILE, e)
+        return False
+    logger.info("已把旧版 rawtherapee-cli 路径迁移为 RT 版本"
+                "（共 %d 个版本，当前版本=%s）",
+                len(data["rawtherapee_versions"]),
+                data["active_rawtherapee_version"])
     return True
 
 
@@ -615,17 +739,159 @@ def delete_api_key(profile_id: str = "") -> bool:
     return True
 
 
-# ---------------- RawTherapee 路径 ----------------
+# ---------------- RawTherapee 版本 ----------------
+def list_rt_versions() -> list:
+    """返回所有已记忆的 RT 版本（dict 副本，按保存顺序）。"""
+    return [dict(v) for v in load_settings()["rawtherapee_versions"]]
+
+
+def get_active_rt_version_id() -> str:
+    return _as_text(load_settings().get("active_rawtherapee_version"))
+
+
+def get_rt_version(version_id: str):
+    """按 id 取 RT 版本；不存在返回 None。"""
+    version_id = _as_text(version_id)
+    for version in load_settings()["rawtherapee_versions"]:
+        if version["id"] == version_id:
+            return dict(version)
+    return None
+
+
+def get_active_rt_version():
+    """返回当前选中的 RT 版本（没有记忆任何版本时返回 None）。"""
+    data = load_settings()
+    return _find_profile(data["rawtherapee_versions"],
+                         data["active_rawtherapee_version"])
+
+
+def rt_version_name_taken(name: str, exclude_id: str = "") -> bool:
+    """RT 版本名称是否已被其它版本占用（忽略大小写）。"""
+    name = _as_text(name)
+    if not name:
+        return False
+    return _profile_name_taken(load_settings()["rawtherapee_versions"], name,
+                               exclude_id)
+
+
+def save_rt_version(name: str, path: str, version_id: str = "") -> dict:
+    """
+    新增或更新一个 RT 版本，并把它设为当前使用的版本。
+
+    version_id 为空时新建；名称不能为空、不能与其它版本重复。
+    path 为空表示该版本不指定手动路径（运行时回退到系统 PATH 查找）。
+    返回保存后的版本 dict；校验失败抛 ValueError。
+    """
+    name = _as_text(name)
+    if not name:
+        raise ValueError("版本名称不能为空。")
+    data = load_settings()
+    versions = data["rawtherapee_versions"]
+    version_id = _as_text(version_id)
+    if _profile_name_taken(versions, name, exclude_id=version_id):
+        raise ValueError(f"版本名称「{name}」已存在，请换一个名称。")
+
+    if version_id:
+        target = _find_profile(versions, version_id)
+        if target is None:
+            raise ValueError("要保存的 RT 版本不存在（可能已被删除）。")
+        target.update({"name": name, "path": _as_text(path)})
+    else:
+        version_id = _new_profile_id()
+        target = {"id": version_id, "name": name, "path": _as_text(path)}
+        versions.append(target)
+
+    data["active_rawtherapee_version"] = version_id
+    save_settings(data)
+    logger.info("已保存 RT 版本「%s」（id=%s，路径=%s）并设为当前版本",
+                name, version_id, target["path"] or "（自动从 PATH 查找）")
+    return dict(target)
+
+
+def rename_rt_version(version_id: str, name: str) -> dict:
+    """重命名 RT 版本；校验失败抛 ValueError。"""
+    name = _as_text(name)
+    if not name:
+        raise ValueError("版本名称不能为空。")
+    data = load_settings()
+    versions = data["rawtherapee_versions"]
+    target = _find_profile(versions, _as_text(version_id))
+    if target is None:
+        raise ValueError("RT 版本不存在（可能已被删除）。")
+    if _profile_name_taken(versions, name, exclude_id=target["id"]):
+        raise ValueError(f"版本名称「{name}」已存在，请换一个名称。")
+    old_name = target["name"]
+    target["name"] = name
+    save_settings(data)
+    logger.info("RT 版本「%s」已重命名为「%s」（id=%s）",
+                old_name, name, target["id"])
+    return dict(target)
+
+
+def delete_rt_version(version_id: str) -> bool:
+    """删除一个 RT 版本；删除当前版本后自动切换到剩余的第一个版本。"""
+    data = load_settings()
+    versions = data["rawtherapee_versions"]
+    version_id = _as_text(version_id)
+    target = _find_profile(versions, version_id)
+    if target is None:
+        logger.warning("删除 RT 版本失败：不存在（id=%s）", version_id)
+        return False
+
+    data["rawtherapee_versions"] = [v for v in versions
+                                    if v["id"] != version_id]
+    if data["active_rawtherapee_version"] == version_id:
+        data["active_rawtherapee_version"] = (
+            data["rawtherapee_versions"][0]["id"]
+            if data["rawtherapee_versions"] else "")
+    save_settings(data)
+    logger.info("已删除 RT 版本「%s」（id=%s），当前版本=%s",
+                target["name"], version_id,
+                data["active_rawtherapee_version"] or "（未指定，使用 PATH）")
+    return True
+
+
+def set_active_rt_version(version_id: str) -> bool:
+    """切换当前使用的 RT 版本并持久化（顶层路径会同步）。"""
+    version_id = _as_text(version_id)
+    data = load_settings()
+    target = _find_profile(data["rawtherapee_versions"], version_id)
+    if target is None:
+        logger.warning("切换 RT 版本失败：不存在（id=%s）", version_id)
+        return False
+    if data["active_rawtherapee_version"] == version_id:
+        return True
+    data["active_rawtherapee_version"] = version_id
+    save_settings(data)
+    logger.info("已切换当前 RT 版本为「%s」（id=%s，路径=%s）",
+                target["name"], version_id,
+                target["path"] or "（自动从 PATH 查找）")
+    return True
+
+
+# ---------------- RawTherapee 路径（兼容旧接口） ----------------
 def get_rawtherapee_cli_path() -> str:
-    """返回用户手动指定的 rawtherapee-cli 路径；未指定时返回空串。"""
+    """返回当前 RT 版本的 rawtherapee-cli 路径；未指定时返回空串。"""
     return _as_text(load_settings().get("rawtherapee_cli_path"))
 
 
 def set_rawtherapee_cli_path(path: str) -> str:
-    """保存 / 清空手动指定的 rawtherapee-cli 路径（空串表示改用 PATH）。"""
+    """
+    兼容旧接口：更新当前 RT 版本的 rawtherapee-cli 路径。
+
+    没有任何版本时会自动新建「默认版本」；空串表示该版本不指定手动路径
+    （运行时回退到系统 PATH 查找）。
+    """
     path = _as_text(path)
     data = load_settings()
-    data["rawtherapee_cli_path"] = path
+    versions = data["rawtherapee_versions"]
+    target = _find_profile(versions, data["active_rawtherapee_version"])
+    if target is None:
+        if not path:
+            return ""
+        version = save_rt_version(RT_DEFAULT_VERSION_NAME, path)
+        return version["path"]
+    target["path"] = path
     save_settings(data)
     logger.info("已保存 rawtherapee-cli 路径: %s",
                 path or "（清空，改为从 PATH 查找）")
