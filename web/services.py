@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from fastapi import HTTPException
 
 import settings
 import rt_processor
@@ -103,11 +104,22 @@ class Task:
 
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="web-task")
+# 限制全局同时只允许 3 个任务在跑
+_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="web-task")
+_tasks_lock = threading.Lock()
+_active_task_count = 0
 
 def create_task(config: dict) -> Task:
+    global _active_task_count
+    with _tasks_lock:
+        # 如果当前排队的任务超过 50 个，直接拒绝
+        if len(_tasks) > 50:
+            raise HTTPException(status_code=429, detail="服务器排队人数过多，请稍后再试")
+        _active_task_count += 1
+        
     task = Task(id=uuid.uuid4().hex, config=config)
-    with _tasks_lock: _tasks[task.id] = task
+    with _tasks_lock: 
+        _tasks[task.id] = task
     return task
 
 def get_task(task_id: str) -> Optional[Task]:
@@ -117,7 +129,9 @@ def run_task_async(task: Task):
     _executor.submit(_run_task, task)
 
 def _run_task(task: Task):
-    try: _do_run(task)
+    global _active_task_count
+    try: 
+        _do_run(task)
     except Exception as e:
         logger.exception("Task crashed")
         task.log(f"❌ 任务异常: {e}")
@@ -126,7 +140,11 @@ def _run_task(task: Task):
             for fid, st in task.file_status.items():
                 if st in ("pending", "running"):
                     task.file_status[fid] = "failed"
-                    if fid not in task.failed_ids: task.failed_ids.append(fid)
+                    if fid not in task.failed_ids: 
+                        task.failed_ids.append(fid)
+    finally:
+        with _tasks_lock:
+            _active_task_count = max(0, _active_task_count - 1)
 
 def _do_run(task: Task):
     cfg = task.config
@@ -234,3 +252,19 @@ def _run_review(info, path, desc, api_cfg, user_id):
         })
     except Exception as e:
         info["state"] = "error"; info["error"] = str(e)
+
+        # ================= 新增：后台清理守护线程 =================
+def _cleanup_daemon():
+    """每小时跑一次，清理 24 小时前的缓存和死任务"""
+    while True:
+        time.sleep(3600)
+        cleanup_old_uploads(max_age_seconds=86400)
+        
+        # 清理完成超过 2 小时的任务记录（释放内存）
+        with _tasks_lock:
+            for tid in list(_tasks.keys()):
+                if _tasks[tid].state in ("finished", "cancelled"):
+                    del _tasks[tid]
+
+# 启动后台清理线程（守护模式）
+threading.Thread(target=_cleanup_daemon, daemon=True).start()
