@@ -3,449 +3,271 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PhotoMagic</title>
+<title>PhotoMagic - AI RAW 影像处理</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<!-- 全局图标符号库 -->
-<svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <symbol id="i-process" viewBox="0 0 24 24">
-    <path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="square"/>
-  </symbol>
-  <symbol id="i-review" viewBox="0 0 24 24">
-    <path d="M12 3l2.6 5.6 6.1.8-4.5 4.3 1.1 6.1L12 16.9 6.7 19.8l1.1-6.1L3.3 9.4l6.1-.8L12 3z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
-  </symbol>
-  <symbol id="i-settings" viewBox="0 0 24 24">
-    <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6" fill="none"/>
-    <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="square"/>
-  </symbol>
-  <symbol id="i-about" viewBox="0 0 24 24">
-    <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6" fill="none"/>
-    <path d="M12 10v6M12 7v.01" stroke="currentColor" stroke-width="1.6" stroke-linecap="square"/>
-  </symbol>
-  <symbol id="i-plus" viewBox="0 0 24 24">
-    <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
-  </symbol>
-  <symbol id="i-trash" viewBox="0 0 24 24">
-    <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/>
-  </symbol>
-  <symbol id="i-play" viewBox="0 0 24 24">
-    <path d="M7 4l13 8-13 8V4z" fill="currentColor"/>
-  </symbol>
-  <symbol id="i-stop" viewBox="0 0 24 24">
-    <rect x="6" y="6" width="12" height="12" fill="currentColor"/>
-  </symbol>
-  <symbol id="i-upload" viewBox="0 0 24 24">
-    <path d="M12 16V4M6 10l6-6 6 6M4 20h16" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="square"/>
-  </symbol>
-  <symbol id="i-eye" viewBox="0 0 24 24">
-    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" stroke="currentColor" stroke-width="1.5" fill="none"/>
-    <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5" fill="none"/>
-  </symbol>
-  <symbol id="i-check" viewBox="0 0 24 24">
-    <path d="M4 12l5 5L20 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="square"/>
-  </symbol>
-  <symbol id="i-x" viewBox="0 0 24 24">
-    <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
-  </symbol>
-</svg>
+<!-- 动态背景层 -->
+<div class="bg-blur" id="bg-blur"></div>
 
-<div class="app">
+<!-- 顶部导航栏 -->
+<nav class="navbar">
+  <div class="nav-left">
+    <a href="#home" class="nav-brand" data-target="home">
+      <span class="brand-icon">PM</span>
+      <span class="brand-name">PhotoMagic</span>
+    </a>
+    <div class="nav-links">
+      <a href="#home" class="nav-link active" data-target="home">首页</a>
+      <a href="#workspace" class="nav-link" data-target="workspace">工作台</a>
+      <a href="#review" class="nav-link" data-target="review">照片评价</a>
+      <!-- 标签先留着，后续你可以自己加 -->
+      <a href="#gallery" class="nav-link" data-target="gallery">案例展示</a>
+    </div>
+  </div>
+  
+  <div class="nav-right">
+    <!-- 服务器状态指示器 -->
+    <div class="server-status" id="server-status">
+      <span class="dot loading"></span>
+      <span class="text">正在连接服务器...</span>
+    </div>
+    <!-- 设置按钮 -->
+    <button class="icon-btn" id="btn-open-settings" title="参数与密钥设置">
+      <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+    </button>
+  </div>
+</nav>
 
-  <!-- ================= 侧栏 ================= -->
-  <aside class="sidebar">
-    <div class="brand">
-      <span class="brand-glyph">PM</span>
-      <span class="brand-title">PhotoMagic</span>
-      <span class="brand-ver">0.5.0</span>
+<!-- 主内容区 -->
+<main class="main-content">
+  
+  <!-- 首页 -->
+  <section class="view active" id="view-home">
+    <div class="hero-section">
+      <h1 class="hero-title">释放 RAW 格式的全部潜能</h1>
+      <p class="hero-subtitle">由 LLM 视觉大模型驱动的智能后期助手，自动分析画面并生成最优 RawTherapee 参数。即拖即传，云端渲染，即刻下载。</p>
+      <button class="btn btn-primary btn-lg" onclick="document.querySelector('[data-target=workspace]').click()">开始处理照片</button>
     </div>
 
-    <nav class="nav">
-      <a class="nav-item active" data-page="process" href="#process">
-        <svg class="ico"><use href="#i-process"/></svg>
-        <span>处理</span>
-      </a>
-      <a class="nav-item" data-page="review" href="#review">
-        <svg class="ico"><use href="#i-review"/></svg>
-        <span>照片评价</span>
-      </a>
-      <a class="nav-item" data-page="settings" href="#settings">
-        <svg class="ico"><use href="#i-settings"/></svg>
-        <span>设置</span>
-      </a>
-      <a class="nav-item" data-page="about" href="#about">
-        <svg class="ico"><use href="#i-about"/></svg>
-        <span>关于</span>
-      </a>
-    </nav>
-
-    <div class="sidebar-foot">
-      <div class="status-pill" id="pill-api"><span class="dot"></span><span class="pill-label">API</span><span class="pill-value">—</span></div>
-      <div class="status-pill" id="pill-rt"><span class="dot"></span><span class="pill-label">RT</span><span class="pill-value">—</span></div>
-    </div>
-  </aside>
-
-  <!-- ================= 主区 ================= -->
-  <main class="main">
-
-    <header class="topbar">
-      <div class="crumbs">
-        <span class="crumb-root">工作台</span>
-        <span class="crumb-sep">/</span>
-        <span class="crumb-current" id="crumb-current">处理</span>
+    <div class="dashboard-grid">
+      <!-- 系统状态卡片 -->
+      <div class="card glass-card status-card">
+        <div class="card-header">
+          <h3>渲染引擎状态</h3>
+        </div>
+        <div class="card-body">
+          <div id="rt-status-detail" class="status-detail">
+            <span class="dot loading"></span> 正在检测服务器环境...
+          </div>
+          <p class="text-muted mt-2">RawTherapee 是处理的核心依赖，如果服务器未安装将无法处理图片。</p>
+        </div>
       </div>
-      <div class="topbar-actions" id="topbar-actions"></div>
-    </header>
 
-    <div class="pages">
-
-      <!-- ============ 处理页 ============ -->
-      <section class="page active" id="page-process">
-
-        <div class="workbench">
-
-          <!-- 文件列表 -->
-          <section class="card card-files">
-            <header class="card-head">
-              <div>
-                <h2>RAW 照片</h2>
-                <p class="card-sub" id="files-sub">尚未添加文件</p>
-              </div>
-              <div class="toolbar">
-                <button class="btn" id="btn-add-files">
-                  <svg class="ico"><use href="#i-upload"/></svg>添加
-                </button>
-                <button class="btn btn-quiet" id="btn-clear-files">清空</button>
-                <div class="toolbar-sep"></div>
-                <button class="btn btn-quiet" id="btn-check-all">全选</button>
-                <button class="btn btn-quiet" id="btn-uncheck-all">全不选</button>
-                <div class="toolbar-sep"></div>
-                <button class="btn btn-quiet" id="btn-group">设为一组</button>
-                <button class="btn btn-quiet" id="btn-ungroup">取消分组</button>
-              </div>
-            </header>
-
-            <div class="dropzone" id="drop-zone">
-              <svg class="dropzone-icon"><use href="#i-upload"/></svg>
-              <div class="dropzone-title">拖拽 RAW 文件到这里</div>
-              <div class="dropzone-sub">或点击上方「添加」，支持 CR2 / NEF / ARW / DNG / RAF 等</div>
-            </div>
-
-            <ul class="files" id="file-list"></ul>
-
-            <footer class="card-foot">
-              <span class="group-hint" id="group-hint">按单张处理</span>
-            </footer>
-          </section>
-
-          <!-- 预览 -->
-          <section class="card card-preview">
-            <header class="card-head">
-              <div>
-                <h2>预览</h2>
-                <p class="card-sub">拖动中缝对比原图与处理后</p>
-              </div>
-              <span class="tag" id="preview-tag">未选择</span>
-            </header>
-
-            <div class="preview" id="preview-area">
-              <canvas id="preview-canvas"></canvas>
-              <div class="preview-empty" id="preview-placeholder">
-                <div class="preview-empty-glyph">◐</div>
-                <div>选中左侧任一照片查看预览</div>
-              </div>
-            </div>
-          </section>
-
+      <!-- 最近案例（如果 gallery 有图会自动展示） -->
+      <div class="card glass-card gallery-card">
+        <div class="card-header">
+          <h3>精选影像</h3>
+          <a href="#gallery" class="text-link" data-target="gallery">查看全部 →</a>
         </div>
-
-        <!-- 日志 -->
-        <section class="card card-log">
-          <header class="card-head">
-            <div><h2>处理日志</h2></div>
-            <button class="btn btn-quiet btn-sm" id="btn-clear-log">清空</button>
-          </header>
-          <pre class="log" id="log"></pre>
-        </section>
-
-        <!-- 操作栏 -->
-        <div class="actionbar">
-          <input class="input input-prompt" id="user-prompt"
-                 placeholder="User Prompt — 告诉 LLM 你想要的风格，例如「通透的德系风格」">
-          <div class="actionbar-btns">
-            <button class="btn-icon btn-play" id="btn-start" title="开始处理">
-              <svg><use href="#i-play"/></svg>
-            </button>
-            <button class="btn-icon btn-halt" id="btn-stop" title="停止" disabled>
-              <svg><use href="#i-stop"/></svg>
-            </button>
-          </div>
-          <button class="btn btn-quiet" id="btn-retry" disabled>重试失败</button>
-          <div class="progress">
-            <div class="progress-track"><div class="progress-fill" id="progress-bar"></div></div>
-            <span class="progress-label" id="progress-text">0 / 0</span>
-          </div>
+        <div class="card-body preview-gallery" id="home-gallery">
+          <div class="empty-placeholder">暂无案例图</div>
         </div>
-
-      </section>
-
-      <!-- ============ 评价页 ============ -->
-      <section class="page" id="page-review">
-
-        <div class="review-hero">
-          <div class="card card-review-media">
-            <header class="card-head">
-              <div><h2>待评价照片</h2><p class="card-sub" id="review-path-label">未选择图片</p></div>
-              <button class="btn" id="btn-review-pick">选择</button>
-            </header>
-            <div class="review-media" id="review-preview">
-              <div class="preview-empty"><div class="preview-empty-glyph">◐</div><div>未选择图片</div></div>
-            </div>
-          </div>
-
-          <div class="card card-review-form">
-            <header class="card-head"><div><h2>提交评价</h2></div></header>
-            <div class="field">
-              <label>描述（可选）</label>
-              <input class="input" id="review-desc" placeholder="用一句话描述这张照片，供 AI 参考">
-            </div>
-            <div class="btn-row">
-              <button class="btn btn-primary" id="btn-review-submit">提交评价</button>
-              <button class="btn btn-halt" id="btn-review-cancel" disabled>取消</button>
-            </div>
-            <div class="status-line" id="review-status">就绪</div>
-          </div>
-        </div>
-
-        <div class="review-output">
-          <section class="card card-radar">
-            <header class="card-head"><div><h2>多维度评分</h2></div></header>
-            <div class="radar-wrap">
-              <canvas id="review-radar" width="360" height="360"></canvas>
-            </div>
-          </section>
-
-          <section class="card card-review-text">
-            <header class="card-head"><div><h2>评价内容</h2></div></header>
-            <div class="field">
-              <label>综合评价</label>
-              <textarea class="input area" id="review-summary" readonly rows="4"></textarea>
-            </div>
-            <div class="field">
-              <label>改进建议</label>
-              <textarea class="input area" id="review-suggestions" readonly rows="5"></textarea>
-            </div>
-          </section>
-        </div>
-
-        <section class="card card-history">
-          <header class="card-head">
-            <div><h2>历史记录</h2><p class="card-sub" id="history-sub">暂无记录</p></div>
-            <div class="toolbar">
-              <button class="btn btn-quiet btn-sm" id="btn-review-export">导出选中</button>
-              <button class="btn btn-quiet btn-sm" id="btn-review-delete">删除</button>
-              <button class="btn btn-quiet btn-sm" id="btn-review-clear">清空</button>
-            </div>
-          </header>
-          <ul class="history" id="review-history"></ul>
-        </section>
-
-      </section>
-
-      <!-- ============ 设置页 ============ -->
-      <section class="page" id="page-settings">
-
-        <section class="card">
-          <header class="card-head">
-            <div><h2>LLM 接口配置</h2><p class="card-sub">多套方案，分别保存 API Key</p></div>
-          </header>
-
-          <div class="field field-row">
-            <label>配置方案</label>
-            <div class="btn-row">
-              <select class="input" id="profile-select"></select>
-              <button class="btn btn-sm" id="btn-profile-new">新建</button>
-              <button class="btn btn-quiet btn-sm" id="btn-profile-rename">重命名</button>
-              <button class="btn btn-quiet btn-sm" id="btn-profile-delete">删除</button>
-              <button class="btn btn-sm" id="btn-profile-activate">设为当前</button>
-            </div>
-          </div>
-          <div class="field"><label>名称</label><input class="input" id="profile-name"></div>
-          <div class="field"><label>API Base URL</label><input class="input" id="profile-base" placeholder="https://api.openai.com/v1"></div>
-          <div class="field"><label>Model</label><input class="input" id="profile-model" placeholder="gpt-4o"></div>
-          <div class="field">
-            <label>API Key</label>
-            <div class="btn-row">
-              <input class="input" type="password" id="profile-key" placeholder="sk-...">
-              <button class="btn btn-quiet btn-sm" id="btn-key-toggle">
-                <svg class="ico"><use href="#i-eye"/></svg>显示
-              </button>
-              <button class="btn btn-sm" id="btn-key-save">保存 Key</button>
-              <button class="btn btn-quiet btn-sm" id="btn-key-clear">清除</button>
-            </div>
-          </div>
-          <div class="hint" id="keyring-status"></div>
-        </section>
-
-        <section class="card">
-          <header class="card-head">
-            <div><h2>RawTherapee 版本</h2><p class="card-sub">记忆多个版本，随时切换</p></div>
-          </header>
-
-          <div class="field field-row">
-            <label>RT 版本</label>
-            <div class="btn-row">
-              <select class="input" id="rt-select"></select>
-              <button class="btn btn-sm" id="btn-rt-new">新建</button>
-              <button class="btn btn-quiet btn-sm" id="btn-rt-rename">重命名</button>
-              <button class="btn btn-quiet btn-sm" id="btn-rt-delete">删除</button>
-              <button class="btn btn-sm" id="btn-rt-activate">设为当前</button>
-            </div>
-          </div>
-          <div class="field"><label>版本名称</label><input class="input" id="rt-name"></div>
-          <div class="field">
-            <label>rawtherapee-cli 路径</label>
-            <div class="btn-row">
-              <input class="input" id="rt-path" placeholder="留空则从系统 PATH 查找">
-              <button class="btn btn-sm" id="btn-rt-detect">检测版本</button>
-            </div>
-          </div>
-          <div class="hint" id="rt-status"></div>
-        </section>
-
-        <section class="card">
-          <header class="card-head">
-            <div><h2>自定义参数</h2><p class="card-sub">从 JSON 扩展参数表</p></div>
-          </header>
-          <div class="hint" id="custom-status"></div>
-          <div class="btn-row">
-            <input type="file" id="custom-file" accept=".json" hidden>
-            <button class="btn btn-sm" id="btn-custom-import">导入 JSON</button>
-            <button class="btn btn-quiet btn-sm" id="btn-custom-clear">清空自定义参数</button>
-          </div>
-        </section>
-
-        <section class="card">
-          <header class="card-head"><div><h2>系统信息</h2></div></header>
-          <dl class="kv" id="system-info"></dl>
-        </section>
-
-      </section>
-
-      <!-- ============ 关于页 ============ -->
-      <section class="page" id="page-about">
-
-        <section class="card about-hero">
-          <div class="about-mark">PM</div>
-          <h1 class="about-title">PhotoMagic</h1>
-          <p class="about-sub">RAW 照片 AI 处理助手 · v0.5.0</p>
-          <p class="about-desc">
-            利用 LLM 视觉模型分析 RAW 照片内容，自动生成 RawTherapee 后期参数，
-            批量输出高质量 JPEG。附带 AI 照片评价、多维度雷达图与前后对比功能。
-          </p>
-          <a class="btn" href="https://github.com/lijinyang1028/photomagic.git"
-             target="_blank" rel="noopener">GitHub 仓库</a>
-        </section>
-
-        <section class="card">
-          <header class="card-head"><div><h2>项目成员</h2></div></header>
-          <div class="contributors" id="contributors"></div>
-        </section>
-
-        <section class="card">
-          <header class="card-head"><div><h2>LLM API 注册指引</h2></div></header>
-          <p class="hint">PhotoMagic 需要接入一个兼容 OpenAI 接口的视觉 LLM 服务，以下以 DeepSeek 为例。</p>
-          <ol class="steps" id="api-steps"></ol>
-          <a class="btn" href="https://platform.deepseek.com/sign_in"
-             target="_blank" rel="noopener">打开 DeepSeek 开放平台</a>
-        </section>
-
-      </section>
-
+      </div>
     </div>
-  </main>
+  </section>
 
-  <!-- ================= 右栏检查器 ================= -->
-  <aside class="inspector" id="inspector">
-
-    <div class="inspector-page active" data-page="process">
-      <section class="inspector-block">
-        <h3>LLM 接口</h3>
-        <div class="hint" id="inspector-api-status">—</div>
-        <div class="field">
-          <label>Max Tokens</label>
-          <input class="input" type="number" id="inspector-max-tokens"
-                 min="256" max="32768" step="256" value="1024">
-        </div>
-        <button class="btn btn-quiet btn-sm" id="btn-goto-settings">前往设置</button>
-      </section>
-
-      <section class="inspector-block">
-        <h3>输出设置</h3>
-        <div class="field">
-          <label>输出目录</label>
-          <input class="input" id="inspector-output-dir" placeholder="默认 ~/photomagic_web_output">
-        </div>
-        <div class="grid-2">
-          <div class="field">
-            <label>格式</label>
-            <select class="input" id="inspector-format">
-              <option value="0">JPEG</option>
-              <option value="1">TIFF</option>
-              <option value="2">PNG</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>位深</label>
-            <select class="input" id="inspector-bit-depth">
-              <option value="8">8</option>
-              <option value="16" selected>16</option>
-              <option value="16f">16f</option>
-              <option value="32">32</option>
-            </select>
-          </div>
-        </div>
-        <div class="grid-2">
-          <div class="field">
-            <label>JPEG 质量</label>
-            <input class="input" type="number" id="inspector-quality" min="1" max="100" value="92">
-          </div>
-          <div class="field">
-            <label>并发数</label>
-            <input class="input" type="number" id="inspector-parallel" min="1" max="16" value="3">
-          </div>
-        </div>
-      </section>
-
-      <section class="inspector-block">
-        <h3>AI 强度</h3>
-        <div class="slider-row">
-          <input class="slider" type="range" id="inspector-strength" min="0" max="100" value="100">
-          <span class="slider-value" id="inspector-strength-value">100%</span>
-        </div>
-        <div class="hint">0% = 原图 · 100% = 完整应用 LLM 参数</div>
-      </section>
-
-      <section class="inspector-block">
-        <h3>处理模式</h3>
-        <label class="check">
-          <input type="checkbox" id="inspector-unify">
-          <span class="check-box"></span>
-          <span class="check-label">统一风格</span>
-          <span class="check-hint">同组照片一次提交给 LLM</span>
-        </label>
-        <label class="check">
-          <input type="checkbox" id="inspector-thinking">
-          <span class="check-box"></span>
-          <span class="check-label">原生思考（CoT）</span>
-          <span class="check-hint">让模型先推理再给参数</span>
-        </label>
-        <div class="hint" id="inspector-thinking-hint"></div>
-      </section>
+  <!-- 工作台 -->
+  <section class="view" id="view-workspace">
+    <!-- 大拖拽区 -->
+    <div class="dropzone" id="dropzone">
+      <div class="dropzone-content">
+        <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        <h2>将 RAW 照片拖拽到此处</h2>
+        <p>或点击下方按钮浏览本地文件 (CR2 / NEF / ARW / DNG 等)</p>
+        <button class="btn btn-primary" id="btn-select-files">浏览文件</button>
+        <input type="file" id="file-input" multiple accept=".cr2,.nef,.arw,.dng,.orf,.raf,.rw2,.pef,.jpg,.jpeg,.png" hidden>
+      </div>
     </div>
-  </aside>
 
+    <!-- 图片处理列表 (上传后展示) -->
+    <div class="workspace-container" id="workspace-container" style="display: none;">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <h2>待处理队列 <span class="badge" id="file-count">0</span></h2>
+        </div>
+        <div class="toolbar-right">
+          <button class="btn btn-ghost" id="btn-check-all">全选</button>
+          <button class="btn btn-ghost" id="btn-uncheck-all">全不选</button>
+          <button class="btn btn-ghost" id="btn-clear">清空</button>
+          <div class="divider"></div>
+          <button class="btn btn-primary" id="btn-start">开始处理</button>
+          <button class="btn btn-danger" id="btn-stop" disabled>停止</button>
+        </div>
+      </div>
+
+      <!-- 进度条 -->
+      <div class="global-progress" id="global-progress" style="display: none;">
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        <span class="progress-text" id="progress-text">0 / 0</span>
+      </div>
+
+      <!-- 图片网格 -->
+      <div class="photo-grid" id="photo-grid">
+        <!-- JS 渲染注入 -->
+      </div>
+    </div>
+  </section>
+
+  <!-- 评价页 -->
+   <section class="view" id="view-review">
+    <div class="review-layout">
+      <!-- 左侧：图片选择与预览 -->
+      <div class="review-left">
+        <div class="dropzone compact" id="review-dropzone">
+          <div class="dropzone-content">
+            <svg viewBox="0 0 24 24" width="32" height="32" stroke="currentColor" stroke-width="1.5" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+            <h3>选择一张照片进行 AI 评价</h3>
+            <button class="btn btn-primary btn-sm mt-2" id="btn-review-pick">浏览文件</button>
+          </div>
+        </div>
+        
+        <div class="review-preview-box" id="review-preview-box" style="display:none;">
+          <img id="review-img" src="" alt="待评价照片">
+          <div class="review-img-overlay">
+            <button class="btn btn-ghost btn-sm" id="btn-review-change">更换图片</button>
+          </div>
+        </div>
+
+        <div class="review-form" id="review-form" style="display:none;">
+          <div class="form-item">
+            <label>拍摄描述（可选，帮助 AI 更好地理解）</label>
+            <input type="text" class="input" id="review-desc" placeholder="例如：清晨的逆光人像，使用了 50mm 镜头">
+          </div>
+          <button class="btn btn-primary btn-block" id="btn-review-submit">提交评价</button>
+        </div>
+      </div>
+
+      <!-- 右侧：评价结果与历史记录 -->
+      <div class="review-right">
+        <!-- 加载状态 -->
+        <div class="review-loading" id="review-loading" style="display:none;">
+          <div class="spinner"></div>
+          <p>AI 正在分析画面色彩、构图与光影...</p>
+        </div>
+
+        <!-- 结果展示 -->
+        <div class="review-result-card" id="review-result-card" style="display:none;">
+          <div class="radar-container">
+            <canvas id="radar-chart" width="300" height="300"></canvas>
+          </div>
+          <div class="review-text-content">
+            <h3>综合评价</h3>
+            <p id="res-summary" class="text-box"></p>
+            <h3>改进建议</h3>
+            <ul id="res-suggestions" class="suggestion-list"></ul>
+          </div>
+        </div>
+
+        <!-- 历史记录 -->
+        <div class="review-history" id="review-history-container">
+          <div class="history-header">
+            <h3>历史评价</h3>
+            <button class="btn btn-ghost btn-sm" id="btn-clear-history">清空</button>
+          </div>
+          <div class="history-list" id="review-history-list">
+            <div class="empty-placeholder">暂无历史记录</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 案例展示页 -->
+  <section class="view" id="view-gallery">
+    <div class="section-header">
+      <h2>社区精选案例</h2>
+      <p class="text-muted">维护者可在服务器 `web/static/gallery/` 目录下放入图片自动展示。</p>
+    </div>
+    <div class="photo-grid" id="full-gallery">
+      <!-- JS 渲染注入 -->
+    </div>
+  </section>
+
+</main>
+
+<!-- 设置抽屉 -->
+<div class="drawer-overlay" id="drawer-overlay"></div>
+<aside class="drawer" id="settings-drawer">
+  <div class="drawer-header">
+    <h2>设置</h2>
+    <button class="icon-btn" id="btn-close-settings">✕</button>
+  </div>
+  <div class="drawer-body">
+    
+    <div class="setting-group">
+      <h3>API 密钥与模型</h3>
+      <p class="text-muted text-sm mb-2">密钥仅保存在您的浏览器本地，服务器只做转发，用完即焚。</p>
+      <div class="form-item">
+        <label>API Base URL</label>
+        <input type="text" class="input" id="set-api-base" placeholder="https://api.openai.com/v1">
+      </div>
+      <div class="form-item">
+        <label>Model</label>
+        <input type="text" class="input" id="set-api-model" placeholder="gpt-4o">
+      </div>
+      <div class="form-item">
+        <label>API Key</label>
+        <input type="password" class="input" id="set-api-key" placeholder="sk-...">
+      </div>
+    </div>
+
+    <div class="setting-group">
+      <h3>处理参数 (保存在服务器数据库)</h3>
+      <div class="form-item">
+        <label>User Prompt</label>
+        <textarea class="input" id="set-user-prompt" rows="2"></textarea>
+      </div>
+      <div class="form-item">
+        <label>AI 处理强度: <span id="val-strength" class="text-accent">100%</span></label>
+        <input type="range" id="set-strength" min="0" max="100" value="100" class="slider">
+      </div>
+      <div class="form-item">
+        <label>Max Tokens</label>
+        <input type="number" class="input" id="set-max-tokens" value="1024">
+      </div>
+      <div class="form-item">
+        <label>并发处理数</label>
+        <input type="number" class="input" id="set-parallel" value="3">
+      </div>
+    </div>
+
+    <button class="btn btn-primary btn-block" id="btn-save-settings">保存全部设置</button>
+  </div>
+</aside>
+
+<!-- 沉浸式对比预览 -->
+<div class="modal" id="preview-modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 id="modal-title">照片预览</h3>
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="btn-download" disabled>下载处理结果</button>
+        <button class="icon-btn" id="btn-close-modal">✕</button>
+      </div>
+    </div>
+    <div class="modal-body" id="modal-body">
+      <img id="modal-img" src="" alt="Preview">
+      <div class="processing-overlay" id="modal-processing" style="display:none;">
+        <div class="spinner"></div>
+        <p>AI 处理中...</p>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>
