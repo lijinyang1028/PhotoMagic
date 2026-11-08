@@ -1,0 +1,9 @@
+# requirements-web.txt
+PyQt6>=6.5
+requests>=2.31
+rawpy>=0.18
+Pillow>=10.0
+keyring>0.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+python-multipart>=0.0.6
