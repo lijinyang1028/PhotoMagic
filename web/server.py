@@ -411,15 +411,15 @@ async def start_review(data: ReviewStart, x_user_id: str = Header(default="anony
         info["path"], data.description, data.model_dump(), normalize_user_id(x_user_id)
     )
 
+@app.get("/api/reviews/history")
+async def get_history(x_user_id: str = Header(default="anonymous")):
+    return {"items": db.get_review_history(normalize_user_id(x_user_id))}
+
 @app.get("/api/reviews/{tid}")
 async def get_review(tid: str):
     info = services.get_review_task(tid)
     if not info: raise HTTPException(404, "Not found")
     return info
-
-@app.get("/api/reviews/history")
-async def get_history(x_user_id: str = Header(default="anonymous")):
-    return {"items": db.get_review_history(normalize_user_id(x_user_id))}
 
 @app.delete("/api/reviews/history")
 async def clear_history(x_user_id: str = Header(default="anonymous")):
