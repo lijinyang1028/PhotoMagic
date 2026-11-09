@@ -353,12 +353,15 @@ class LLMClient:
     """兼容 OpenAI 的 LLM 客户端"""
 
     def __init__(self, api_base: str, api_key: str, model: str,
-                 thinking=None, reasoning_cb=None):
+                 thinking=None, reasoning_cb=None, allow_redirects=True):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.model = model
         # None = 不干预（接口默认）；True/False = 显式开启 / 关闭原生思考
         self.thinking = thinking
+        # Web 端传入 False：禁止跟随 HTTP 重定向，防止用公网地址跳转到内网
+        # 完成 SSRF 绕过；桌面端保持默认 True，保持既有兼容性。
+        self.allow_redirects = allow_redirects
         # 可选回调：收到原生思考内容（reasoning_content）时调用，
         # 由 UI 决定显示到哪里；回调异常不能影响主流程。
         self.reasoning_cb = reasoning_cb
@@ -478,6 +481,7 @@ class LLMClient:
             resp = requests.post(
                 url, headers=headers, json=payload,
                 timeout=(10, 60), stream=True,
+                allow_redirects=self.allow_redirects,
             )
         except Exception as e:
             logger.error("LLM 请求发送失败 %s: %s", url, e)
@@ -498,6 +502,17 @@ class LLMClient:
 
         logger.info("LLM 响应：status=%s，body %d 字节，共 %d 块",
                     resp.status_code, len(body), len(chunks))
+
+        if 300 <= resp.status_code < 400:
+            # 禁止重定向的场景下，重定向响应意味着目标地址不是最终 API 地址。
+            # 不跟随跳转可以避免“公网地址 -> 内网地址”的 SSRF 绕过。
+            location = resp.headers.get("Location", "")[:300]
+            logger.error("LLM 接口返回重定向 %s（Location: %s），已拒绝跟随",
+                         resp.status_code, location)
+            raise RuntimeError(
+                f"LLM 接口返回重定向 {resp.status_code}，请把 API Base URL "
+                f"直接填写为最终地址（不会自动跟随 {location or '未知地址'}）"
+            )
 
         if resp.status_code >= 400:
             err_text = body.decode("utf-8", errors="replace")[:500]

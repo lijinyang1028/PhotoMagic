@@ -46,6 +46,30 @@ async function apiFetch(url, options = {}) {
   return res.json();
 }
 
+// ================= HTML / URL 安全处理（防 XSS） =================
+// 所有拼接进 innerHTML 的动态数据都必须经过这里转义，避免用户文件名或
+// LLM 返回内容被当作 HTML/JS 执行。
+function escapeHtml(value) {
+  const map = {
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+    "'": '&#39;', '`': '&#96;', '=': '&#61;', '/': '&#47;',
+  };
+  return String(value == null ? '' : value).replace(/[&<>"'`=\/]/g, ch => map[ch]);
+}
+
+// 只接受后端生成的图片 data URL，避免注入 javascript: / 属性逃逸
+function safeImageDataUrl(value) {
+  const text = String(value == null ? '' : value);
+  return /^data:image\/(?:jpeg|jpg|png|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(text) ? text : '';
+}
+
+// 把静态目录文件名转成可安全放进 URL / CSS 的片段
+function encodeStaticName(value) {
+  const name = String(value == null ? '' : value);
+  if (!name || /[\/\\\x00-\x1f"'`<>]/.test(name)) return '';
+  return encodeURIComponent(name);
+}
+
 // 全局提示
 function toast(msg, type = 'info') {
   const el = document.createElement('div');
@@ -65,6 +89,18 @@ function toast(msg, type = 'info') {
     el.style.opacity = '0';
     setTimeout(() => el.remove(), 300);
   }, 3000);
+}
+
+// ================= 事件绑定 =================
+function bindEvents() {
+  // 首页“开始处理照片”按钮（原先用内联 onclick，不符合 CSP 要求）
+  const heroStart = document.getElementById('btn-hero-start');
+  if (heroStart) {
+    heroStart.addEventListener('click', () => {
+      const workspaceNav = document.querySelector('.nav-link[data-target="workspace"]');
+      if (workspaceNav) workspaceNav.click();
+    });
+  }
 }
 
 // ================= 初始化与路由 =================
@@ -112,9 +148,10 @@ async function checkSystemStatus() {
   
   try {
     const sys = await apiFetch('/api/system');
+    const rtVersion = escapeHtml(sys.rt_version);
     if (sys.rt_available) {
-      statusEl.innerHTML = `<span class="dot ok"></span><span class="text">服务器就绪 (RT ${sys.rt_version})</span>`;
-      detailEl.innerHTML = `<span class="dot ok"></span> RawTherapee ${sys.rt_version} 已就绪`;
+      statusEl.innerHTML = `<span class="dot ok"></span><span class="text">服务器就绪 (RT ${rtVersion})</span>`;
+      detailEl.innerHTML = `<span class="dot ok"></span> RawTherapee ${rtVersion} 已就绪`;
     } else {
       statusEl.innerHTML = `<span class="dot error"></span><span class="text">缺少 RT 引擎</span>`;
       detailEl.innerHTML = `<span class="dot error"></span> 警告: 服务器未安装 rawtherapee-cli，无法处理图片。`;
@@ -130,8 +167,8 @@ async function loadBackground() {
   try {
     const res = await apiFetch('/api/backgrounds');
     if (res.images && res.images.length > 0) {
-      const img = res.images[Math.floor(Math.random() * res.images.length)];
-      document.getElementById('bg-blur').style.backgroundImage = `url('/static/backgrounds/${img}')`;
+      const img = encodeStaticName(res.images[Math.floor(Math.random() * res.images.length)]);
+      if (img) document.getElementById('bg-blur').style.backgroundImage = `url('/static/backgrounds/${img}')`;
     }
   } catch(e) { console.warn("背景加载失败", e); }
 }
@@ -149,16 +186,22 @@ async function loadGallery() {
     }
 
     // 首页只取前 6 张
-    const homeImgs = res.images.slice(0, 6);
-    homeGal.innerHTML = homeImgs.map(img => `<img src="/static/gallery/${img}" loading="lazy">`).join('');
+    const homeImgs = res.images.slice(0, 6)
+      .map(encodeStaticName)
+      .filter(Boolean);
+    homeGal.innerHTML = homeImgs.map(img => `<img src="/static/gallery/${img}" loading="lazy" alt="">`).join('');
     
     // 画廊页取全部
-    fullGal.innerHTML = res.images.map(img => `
+    fullGal.innerHTML = res.images.map(rawName => {
+      const img = encodeStaticName(rawName);
+      if (!img) return '';
+      return `
       <div class="photo-item">
-        <img src="/static/gallery/${img}" class="photo-thumb" loading="lazy">
-        <div class="photo-info"><div class="photo-name">${img}</div></div>
+        <img src="/static/gallery/${img}" class="photo-thumb" loading="lazy" alt="">
+        <div class="photo-info"><div class="photo-name">${escapeHtml(rawName)}</div></div>
       </div>
-    `).join('');
+    `;
+    }).join('');
   } catch(e) { console.warn("画廊加载失败", e); }
 }
 
@@ -264,13 +307,19 @@ function renderGrid() {
   grid.innerHTML = state.files.map(f => {
     let badgeClass = f.status === 'done' ? 'done' : f.status === 'failed' ? 'failed' : f.status === 'running' ? 'running' : '';
     let badgeText = {pending:'待处理', running:'处理中', done:'已完成', failed:'失败'}[f.status] || '待处理';
+    const name = escapeHtml(f.name);
+    const id = escapeHtml(f.id);
+    const thumb = safeImageDataUrl(f.thumb);
+    const thumbHtml = thumb
+      ? `<img src="${thumb}" class="photo-thumb" alt="">`
+      : `<div class="photo-thumb"></div>`;
     
     return `
-      <div class="photo-item ${f.checked?'selected':''}" data-id="${f.id}">
+      <div class="photo-item ${f.checked?'selected':''}" data-id="${id}">
         <div class="select-indicator"></div>
-        <img src="${f.thumb}" class="photo-thumb">
+        ${thumbHtml}
         <div class="photo-info">
-          <div class="photo-name" title="${f.name}">${f.name}</div>
+          <div class="photo-name" title="${name}">${name}</div>
           <div class="photo-meta">
             <span class="status-badge ${badgeClass}">${badgeText}</span>
             <span class="text-muted text-sm">${(f.size/1024/1024).toFixed(1)} MB</span>
@@ -389,7 +438,7 @@ function openPreview(file) {
   state.currentPreviewFile = file;
   const modal = document.getElementById('preview-modal');
   document.getElementById('modal-title').textContent = file.name;
-  document.getElementById('modal-img').src = file.thumb;
+  document.getElementById('modal-img').src = safeImageDataUrl(file.thumb);
   
   const btnDownload = document.getElementById('btn-download');
   const overlay = document.getElementById('modal-processing');
@@ -409,7 +458,9 @@ function openPreview(file) {
 document.getElementById('btn-close-modal').addEventListener('click', () => document.getElementById('preview-modal').classList.remove('active'));
 document.getElementById('btn-download').addEventListener('click', () => {
   if(state.taskId && state.currentPreviewFile) {
-    window.open(`/api/tasks/${state.taskId}/output/${state.currentPreviewFile.id}`, '_blank');
+    const tid = encodeURIComponent(state.taskId);
+    const fid = encodeURIComponent(state.currentPreviewFile.id);
+    window.open(`/api/tasks/${tid}/output/${fid}`, '_blank', 'noopener');
   }
 });
 
@@ -460,7 +511,7 @@ function initReviewModule() {
       const uploaded = res.files[0];
       
       reviewState.currentFileId = uploaded.id;
-      document.getElementById('review-img').src = uploaded.thumb;
+      document.getElementById('review-img').src = safeImageDataUrl(uploaded.thumb);
       document.getElementById('review-form').style.display = 'block';
       document.getElementById('review-result-card').style.display = 'none';
     } catch (err) {
@@ -536,13 +587,16 @@ async function pollReviewResult() {
 }
 
 function renderReviewResult(result) {
+  result = result || {};
   document.getElementById('res-summary').textContent = result.summary || '';
   
   const ul = document.getElementById('res-suggestions');
-  ul.innerHTML = (result.suggestions || []).map(s => `<li>${s}</li>`).join('');
+  const suggestions = Array.isArray(result.suggestions) ? result.suggestions : [];
+  // LLM 返回的内容不可信，必须转义后再拼接，避免被当作 HTML 执行
+  ul.innerHTML = suggestions.map(s => `<li>${escapeHtml(s)}</li>`).join('');
   
   // 绘制雷达图
-  drawRadarChart(result.scores);
+  drawRadarChart(result.scores || {});
 }
 
 function drawRadarChart(scores) {
@@ -648,19 +702,21 @@ async function loadReviewHistory() {
     }
     
     list.innerHTML = reviewState.history.map((item, idx) => {
+      item = item || {};
       const scores = item.scores || {};
-      const scoreVals = Object.values(scores);
+      const scoreVals = Object.values(scores).filter(v => typeof v === 'number' && isFinite(v));
       const avg = scoreVals.length ? (scoreVals.reduce((a,b)=>a+b,0)/scoreVals.length).toFixed(1) : '-';
       // 提取文件名
-      const filename = item.image_path.split(/[/\\]/).pop() || '未知图片';
+      const rawPath = typeof item.image_path === 'string' ? item.image_path : '';
+      const filename = rawPath.split(/[/\\]/).pop() || '未知图片';
       
       return `
         <div class="history-item" data-idx="${idx}">
           <div class="history-info">
-            <div class="history-title">${filename}</div>
-            <div class="history-date">${item.timestamp}</div>
+            <div class="history-title">${escapeHtml(filename)}</div>
+            <div class="history-date">${escapeHtml(item.timestamp)}</div>
           </div>
-          <div class="history-score">${avg}</div>
+          <div class="history-score">${escapeHtml(avg)}</div>
         </div>
       `;
     }).join('');

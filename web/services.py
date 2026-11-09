@@ -1,4 +1,5 @@
 import json
+import re
 import logging
 import os
 import threading
@@ -22,18 +23,60 @@ from grouping import (
 from web.prompts import DEFAULT_USER_PROMPT, REVIEW_SYSTEM_PROMPT, build_system_prompt
 from web import db
 
+# 限制单张图片的解码像素，防御“解压炸弹”式图片占用大量内存
+try:
+    from PIL import Image as _PILImage
+    _PILImage.MAX_IMAGE_PIXELS = 50_000_000
+except Exception:  # pragma: no cover - PIL 缺失时不影响其它功能
+    pass
+
 logger = logging.getLogger(__name__)
 
 WEB_DATA_DIR = Path(settings.CONFIG_DIR) / "web_uploads"
 WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR = Path(os.path.expanduser("~")) / "photomagic_web_output"
+
+# 暂存上传数量上限，防止匿名请求无限堆积文件
+MAX_PENDING_UPLOADS = 500
+# 评价任务数量上限，防止任务结果无限占用内存
+MAX_REVIEW_TASKS = 200
+# 上传文件名的最大长度，避免超长文件名导致落盘失败
+MAX_UPLOAD_NAME_LEN = 200
 
 _uploads: dict = {}
 _uploads_lock = threading.Lock()
 
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.\- ]+", re.UNICODE)
+
+
+def sanitize_upload_name(filename: str) -> str:
+    """把用户提供的文件名收敛成安全的单层文件名（不含路径分隔符/控制字符）。"""
+    name = str(filename or "")
+    # 同时处理 POSIX 与 Windows 的路径写法，只保留最后一段
+    name = name.replace("\\", "/").split("/")[-1]
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    name = _UNSAFE_FILENAME_CHARS.sub("_", name)
+    name = name.strip(" .")
+    if not name or name in {".", ".."}:
+        name = "upload"
+    if len(name) > MAX_UPLOAD_NAME_LEN:
+        suffix = Path(name).suffix[:20]
+        name = name[: max(1, MAX_UPLOAD_NAME_LEN - len(suffix))] + suffix
+    return name
+
+
 def save_upload(filename: str, data: bytes) -> dict:
+    with _uploads_lock:
+        if len(_uploads) >= MAX_PENDING_UPLOADS:
+            raise HTTPException(429, "服务器暂存文件过多，请稍后再试")
+
     file_id = uuid.uuid4().hex
-    safe = Path(filename).name if filename else f"upload_{file_id}.raw"
+    safe = sanitize_upload_name(filename or f"upload_{file_id}.raw")
     dest = WEB_DATA_DIR / f"{file_id}_{safe}"
+    # 双保险：确保落盘路径始终位于暂存目录内，杜绝路径穿越
+    if dest.resolve().parent != WEB_DATA_DIR.resolve():
+        raise HTTPException(400, "非法文件名")
+
     dest.write_bytes(data)
     info = {"id": file_id, "name": safe, "path": str(dest), "size": len(data), "created_at": time.time()}
     with _uploads_lock:
@@ -41,7 +84,8 @@ def save_upload(filename: str, data: bytes) -> dict:
     return info
 
 def get_upload(file_id: str) -> Optional[dict]:
-    return _uploads.get(file_id)
+    with _uploads_lock:
+        return _uploads.get(file_id)
 
 def make_thumbnail(path: str, size=(400, 400)) -> str:
     b64 = load_image_base64_from_raw(path, thumb_size=size)
@@ -59,6 +103,16 @@ def cleanup_old_uploads(max_age_seconds=86400):
                 except Exception:
                     pass
                 del _uploads[fid]
+
+
+def is_within_output_dir(path: str) -> bool:
+    """判断给定路径是否位于受控的输出目录内（防止任意文件读取）。"""
+    try:
+        target = Path(path).resolve()
+        base = OUTPUT_DIR.resolve()
+        return target == base or base in target.parents
+    except Exception:
+        return False
 
 # ----------------- 处理任务 -----------------
 @dataclass
@@ -106,19 +160,18 @@ _tasks: dict = {}
 _tasks_lock = threading.Lock()
 # 限制全局同时只允许 3 个任务在跑
 _executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="web-task")
-_tasks_lock = threading.Lock()
 _active_task_count = 0
 
 def create_task(config: dict) -> Task:
     global _active_task_count
     with _tasks_lock:
-        # 如果当前排队的任务超过 50 个，直接拒绝
+        # 如果当前排队/运行的任务超过 50 个，直接拒绝
         if len(_tasks) > 50:
             raise HTTPException(status_code=429, detail="服务器排队人数过多，请稍后再试")
         _active_task_count += 1
-        
+
     task = Task(id=uuid.uuid4().hex, config=config)
-    with _tasks_lock: 
+    with _tasks_lock:
         _tasks[task.id] = task
     return task
 
@@ -130,7 +183,7 @@ def run_task_async(task: Task):
 
 def _run_task(task: Task):
     global _active_task_count
-    try: 
+    try:
         _do_run(task)
     except Exception as e:
         logger.exception("Task crashed")
@@ -140,7 +193,7 @@ def _run_task(task: Task):
             for fid, st in task.file_status.items():
                 if st in ("pending", "running"):
                     task.file_status[fid] = "failed"
-                    if fid not in task.failed_ids: 
+                    if fid not in task.failed_ids:
                         task.failed_ids.append(fid)
     finally:
         with _tasks_lock:
@@ -150,7 +203,7 @@ def _do_run(task: Task):
     cfg = task.config
     target_ids = cfg.get("target_ids") or []
     groups = cfg.get("groups") or {}
-    
+
     id_to_info = {fid: get_upload(fid) for fid in target_ids if get_upload(fid)}
     if not id_to_info:
         task.log("❌ 没有可处理的文件"); return
@@ -162,10 +215,11 @@ def _do_run(task: Task):
     batches = partition_targets(paths, groups_by_path, cfg.get("unify", False))
     task.total = len(paths)
     with task.lock: task.state = "running"
-    
+
     client = LLMClient(
-        api_base=cfg["api_base"], api_key=cfg["api_key"], 
-        model=cfg["model"], thinking=cfg.get("thinking", False)
+        api_base=cfg["api_base"], api_key=cfg["api_key"],
+        model=cfg["model"], thinking=cfg.get("thinking", False),
+        allow_redirects=False,
     )
     sys_prompt = cfg.get("system_prompt") or build_system_prompt()
     usr_prompt = cfg.get("user_prompt") or DEFAULT_USER_PROMPT
@@ -178,13 +232,13 @@ def _do_run(task: Task):
             else:
                 for p in b_paths:
                     pool.submit(_process_single, task, p, path_to_id.get(p), client, sys_prompt, usr_prompt, cfg)
-                    
+
     task.log("全部处理完成" if not task.stop_event.is_set() else "处理已停止")
     with task.lock: task.state = "cancelled" if task.stop_event.is_set() else "finished"
 
 def _render_and_run(path: str, params: dict, cfg: dict) -> str:
-    out_dir = os.path.join(os.path.expanduser("~"), "photomagic_web_output")
-    os.makedirs(out_dir, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = str(OUTPUT_DIR)
     pp3 = os.path.join(out_dir, f"{Path(path).stem}.pp3")
     rt_processor.generate_pp3(params, pp3, output_profile=cfg.get("output_profile", "RT_sRGB"), strength=cfg.get("strength", 1.0))
     rt_processor.run_rawtherapee(path, pp3, out_dir, output_format=cfg.get("output_format", "jpg"))
@@ -228,20 +282,26 @@ def _process_group(task, name, paths, path_to_id, client, sys, usr, cfg):
 # ----------------- 评价任务 -----------------
 _review_executor = ThreadPoolExecutor(max_workers=2)
 _review_tasks = {}
+_review_lock = threading.Lock()
 
 def start_review(image_path: str, desc: str, api_cfg: dict, user_id: str) -> dict:
     tid = uuid.uuid4().hex
-    info = {"id": tid, "state": "pending", "result": None, "error": ""}
-    _review_tasks[tid] = info
+    info = {"id": tid, "state": "pending", "result": None, "error": "", "created_at": time.time()}
+    with _review_lock:
+        if len(_review_tasks) >= MAX_REVIEW_TASKS:
+            raise HTTPException(429, "评价任务过多，请稍后再试")
+        _review_tasks[tid] = info
     _review_executor.submit(_run_review, info, image_path, desc, api_cfg, user_id)
     return {"task_id": tid}
 
-def get_review_task(tid: str): return _review_tasks.get(tid)
+def get_review_task(tid: str):
+    with _review_lock:
+        return _review_tasks.get(tid)
 
 def _run_review(info, path, desc, api_cfg, user_id):
     try:
         info["state"] = "running"
-        client = LLMClient(api_base=api_cfg["api_base"], api_key=api_cfg["api_key"], model=api_cfg["model"])
+        client = LLMClient(api_base=api_cfg["api_base"], api_key=api_cfg["api_key"], model=api_cfg["model"], allow_redirects=False)
         res = client.request_json(REVIEW_SYSTEM_PROMPT, f"请评价这张照片。\n{desc}", path, max_tokens=4096)
         info["state"] = "done"; info["result"] = res
         db.add_review_history(user_id, {
@@ -253,14 +313,23 @@ def _run_review(info, path, desc, api_cfg, user_id):
     except Exception as e:
         info["state"] = "error"; info["error"] = str(e)
 
-        # ================= 新增：后台清理守护线程 =================
+        # ================= 后台清理守护线程 =================
 def _cleanup_daemon():
     """每小时跑一次，清理 24 小时前的缓存和死任务"""
     while True:
         time.sleep(3600)
         cleanup_old_uploads(max_age_seconds=86400)
-        
-        # 清理完成超过 2 小时的任务记录（释放内存）
+
+        # 清理完成超过 2 小时的评价任务记录（释放内存）
+        now = time.time()
+        with _review_lock:
+            for tid in list(_review_tasks.keys()):
+                info = _review_tasks[tid]
+                if (info.get("state") in ("done", "error")
+                        and now - info.get("created_at", now) > 7200):
+                    del _review_tasks[tid]
+
+        # 清理完成的任务记录（释放内存）
         with _tasks_lock:
             for tid in list(_tasks.keys()):
                 if _tasks[tid].state in ("finished", "cancelled"):

@@ -61,11 +61,17 @@ def add_review_history(user_id: str, entry: dict):
 def get_review_history(user_id: str) -> list:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM review_history WHERE user_id = ? ORDER BY id DESC", (user_id,)).fetchall()
-        return [{
-            "id": r["id"], "timestamp": r["timestamp"], "image_path": r["image_path"],
-            "description": r["description"], "scores": json.loads(r["scores"]),
-            "summary": r["summary"], "suggestions": json.loads(r["suggestions"])
-        } for r in rows]
+        result = []
+        for r in rows:
+            # 只返回文件名，避免把服务器上的绝对路径（含用户名等）泄露给客户端
+            stored_path = r["image_path"] or ""
+            filename = Path(stored_path).name if stored_path else ""
+            result.append({
+                "id": r["id"], "timestamp": r["timestamp"], "image_path": filename,
+                "description": r["description"], "scores": json.loads(r["scores"]),
+                "summary": r["summary"], "suggestions": json.loads(r["suggestions"])
+            })
+        return result
 
 def clear_review_history(user_id: str):
     with get_db() as conn:

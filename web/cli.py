@@ -55,7 +55,8 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_start = subparsers.add_parser("start", help="启动 Web 服务")
-    p_start.add_argument("--host", default="0.0.0.0", help="监听地址 (Linux服务器建议0.0.0.0)")
+    # 默认只监听本机，避免把无鉴权服务直接暴露到局域网/公网
+    p_start.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机；如需局域网访问请显式传 0.0.0.0）")
     p_start.add_argument("--port", type=int, default=8000, help="监听端口")
     p_start.set_defaults(func=cmd_start)
 
